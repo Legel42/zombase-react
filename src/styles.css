@@ -20,11 +20,11 @@ canvas{display:block;cursor:crosshair}
 
 /* Top bar */
 .top-bar{
- display:flex;align-items:center;justify-content:center;gap:16px;
+ display:flex;align-items:center;justify-content:center;gap:12px;
  padding:10px 20px;
 }
 .hp-bar-wrap{
- width:240px;height:22px;border-radius:11px;overflow:hidden;
+ width:200px;height:22px;border-radius:11px;overflow:hidden;
  background:rgba(60,0,0,0.6);border:1px solid rgba(255,50,50,0.2);
  position:relative;
 }
@@ -41,6 +41,42 @@ canvas{display:block;cursor:crosshair}
  font-size:11px;font-weight:700;color:#fff;
  text-shadow:0 1px 3px rgba(0,0,0,0.8);letter-spacing:1px;
 }
+
+/* XP bar */
+.xp-bar-wrap{
+ width:140px;height:16px;border-radius:8px;overflow:hidden;
+ background:rgba(0,60,80,0.5);border:1px solid rgba(0,170,255,0.2);
+ position:relative;
+}
+.xp-bar-fill{
+ height:100%;border-radius:8px;
+ background:linear-gradient(90deg,#0066aa,#0af);
+ transition:width 0.3s ease;
+}
+.xp-text{
+ position:absolute;top:0;left:0;width:100%;height:100%;
+ display:flex;align-items:center;justify-content:center;
+ font-size:9px;font-weight:700;color:#fff;
+ text-shadow:0 1px 3px rgba(0,0,0,0.8);letter-spacing:1px;
+}
+
+/* Level badge */
+.level-badge{
+ background:rgba(0,170,255,0.2);color:#0af;
+ padding:3px 12px;border-radius:20px;font-size:13px;font-weight:800;
+ border:1.5px solid rgba(0,170,255,0.35);
+ text-shadow:0 0 8px rgba(0,170,255,0.3);
+ letter-spacing:1px;
+}
+
+/* Ammo badge */
+.ammo-badge{
+ background:rgba(255,180,0,0.15);color:#fb0;
+ padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700;
+ border:1px solid rgba(255,180,0,0.25);
+ letter-spacing:1px;
+}
+.ammo-badge::before{content:'\2022 ';font-size:14px}
 
 /* Stats bar */
 .stats-bar{
@@ -113,7 +149,47 @@ canvas{display:block;cursor:crosshair}
 .controls-hint{
  position:absolute;bottom:4px;left:50%;transform:translateX(-50%);
  font-size:10px;color:rgba(255,255,255,0.2);pointer-events:none;z-index:2;
- letter-spacing:0.5px;
+ letter-spacing:0.5px;white-space:nowrap;
+}
+
+/* Controls overlay */
+.controls-overlay{
+ position:absolute;top:50%;left:50%;transform:translate(-50%,-60%);
+ padding:24px 32px;min-width:360px;z-index:5;pointer-events:none;
+ animation:fade-in 0.15s ease;
+}
+.controls-overlay h2{
+ font-size:14px;letter-spacing:3px;text-transform:uppercase;
+ color:rgba(255,255,255,0.4);margin-bottom:16px;
+ border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;
+}
+.controls-grid{display:grid;grid-template-columns:auto 1fr;gap:6px 16px}
+.controls-grid .cg-key{
+ color:#0af;font-size:12px;font-weight:700;
+ background:rgba(0,170,255,0.1);padding:2px 8px;border-radius:4px;
+ border:1px solid rgba(0,170,255,0.2);text-align:center;
+}
+.controls-grid .cg-desc{color:rgba(255,255,255,0.7);font-size:12px;display:flex;align-items:center}
+.controls-footer{
+ margin-top:12px;padding-top:8px;
+ border-top:1px solid rgba(255,255,255,0.06);
+ font-size:11px;color:rgba(255,255,255,0.25);text-align:center;
+}
+
+/* Base defense indicators */
+.base-hint{
+ position:absolute;top:85px;left:50%;transform:translateX(-50%);
+ padding:6px 18px;border-radius:20px;
+ background:rgba(255,200,0,0.12);border:1px solid rgba(255,200,0,0.25);
+ color:#fc0;font-size:12px;font-weight:600;
+ pointer-events:none;z-index:3;animation:pulse-slow 1s ease-in-out infinite alternate;
+}
+.base-status{
+ position:absolute;top:85px;left:50%;transform:translateX(-50%);
+ padding:6px 18px;border-radius:20px;
+ background:rgba(255,50,50,0.15);border:1px solid rgba(255,50,50,0.3);
+ color:#f66;font-size:13px;font-weight:700;letter-spacing:1px;
+ pointer-events:none;z-index:3;animation:pulse-slow 0.5s ease-in-out infinite alternate;
 }
 
 /* Death screen */
@@ -150,7 +226,7 @@ canvas{display:block;cursor:crosshair}
 
 /* Stats overlay */
 .stats-overlay{
- position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+ position:absolute;top:50%;left:50%;transform:translate(-50%,10%);
  padding:24px 32px;min-width:320px;z-index:5;pointer-events:none;
  animation:fade-in 0.15s ease;
 }
