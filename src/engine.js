@@ -12,7 +12,7 @@ export const BASE_HP_PLAYER=25,BASE_HP_ZOMBIE=50,BASE_DMG_ZOMBIE=5;
 const WEAPONS={
  bat:{name:'bat',type:'weapon',range:2.8,arc:Math.PI/2.5,dmg:13,cooldown:25,melee:true,label:'Batte'},
  gun:{name:'gun',type:'weapon',range:15,dmg:25,cooldown:20,melee:false,label:'Pistolet',baseSpread:0.03},
- shotgun:{name:'shotgun',type:'weapon',range:8,dmg:12,cooldown:40,melee:false,pellets:5,baseSpread:0.15,label:'Fusil a pompe'},
+ shotgun:{name:'shotgun',type:'weapon',range:9,dmg:18,cooldown:28,melee:false,pellets:5,baseSpread:0.13,label:'Fusil a pompe'},
  smg:{name:'smg',type:'weapon',range:12,dmg:10,cooldown:6,melee:false,label:'Mitraillette',baseSpread:0.06}
 };
 export const WEAPON_DEFS=WEAPONS;
@@ -21,30 +21,36 @@ const HIT_SLOW_DURATION=20;
 const POST_ATTACK_SLOW_DURATION=60;
 const INTERACT_RANGE=2.0;
 const BARREL_EXPLOSION_RADIUS=3,BARREL_EXPLOSION_DMG=40,MAX_BARRELS=3;
-const XP_PER_KILL=5,XP_PER_LEVEL=100;
-// Distance-based spread: spread = baseSpread + distFactor * distance
+const XP_PER_KILL=5,XP_BOSS_MULT=5;
+const XP_PER_LEVEL=100;
 const DIST_SPREAD_FACTOR=0.008;
+const ZOMBIE_CLEANUP_INTERVAL=120;
+const SMG_HEAT_PER_SHOT=0.08,SMG_HEAT_DECAY=0.02,SMG_HEAT_SPREAD_MULT=3;
+const GUNSHOT_SPAWN_COOLDOWN=90*60; // 90 seconds in ticks (60fps)
+const GUNSHOT_SPAWN_COUNT={gun:1,smg:2,shotgun:3};
 
 const rand=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+const tileKey=(x,y)=>y*MAP_W+x;
 
 export const state={
  canvas:null,ctx:null,cam:{x:0,y:0},
  keys:{},mouseX:0,mouseY:0,mouseDown:false,
  gameOver:false,showStats:false,
  map:[],buildings:[],doors:[],items:[],zombies:[],bullets:[],barrels:[],cityWalls:[],
- npcs:[],rockWarnings:[],rocks:[],
+ npcs:[],rockWarnings:[],rocks:[],explosions:[],dmgFloaters:[],
+ doorMap:new Map(),buildingGrid:null,
  escapeZone:{x:0,y:0},
- player:null,mapCount:0,tick:0,attackPressed:false,
+ player:null,mapCount:0,tick:0,attackPressed:false,kills:0,lastGunSpawnTick:-99999,
  W:0,H:0,scale:1,
  message:'',msgTimer:null,
  onDeath:null,onMessage:null,onStateChange:null,
  firstGame:true,showControls:false,
  holdingE:false,holdETimer:0,draggingBarrel:null,
- // Base defense event
  baseEvent:false,baseEventActive:false,baseWaveTimer:0,baseWavesLeft:0,
- baseBoss:null,baseRewardGiven:false
+ baseBoss:null,baseRewardGiven:false,
+ lastTime:0
 };
 
 function emitChange(){state.onStateChange?.()}
@@ -52,16 +58,29 @@ function msg(t,d=2000){
  state.message=t;clearTimeout(state.msgTimer);
  state.msgTimer=setTimeout(()=>{state.message='';emitChange()},d);emitChange();
 }
-
-function isInBuilding(tx,ty){
- for(let b of state.buildings)if(tx>b.x&&tx<b.x+b.w-1&&ty>b.y&&ty<b.y+b.h-1)return true;
- return false;
+function addFloater(x,y,text,color){
+ state.dmgFloaters.push({x,y,text,color:color||'#fff',life:40,maxLife:40});
 }
-function getBuildingAt(tx,ty){
- for(let b of state.buildings)if(tx>b.x&&tx<b.x+b.w-1&&ty>b.y&&ty<b.y+b.h-1)return b;
+
+// -- Spatial lookups --
+function rebuildSpatialMaps(){
+ state.doorMap=new Map();
+ for(let d of state.doors)state.doorMap.set(tileKey(d.x,d.y),d);
+ state.buildingGrid=new Array(MAP_H*MAP_W).fill(null);
+ for(let b of state.buildings){
+  for(let y=b.y;y<b.y+b.h;y++)for(let x=b.x;x<b.x+b.w;x++){
+   if(y>b.y&&y<b.y+b.h-1&&x>b.x&&x<b.x+b.w-1)state.buildingGrid[tileKey(x,y)]=b;
+  }
+ }
+}
+function doorAt(x,y){return state.doorMap.get(tileKey(x,y))||null}
+function isInBuilding(tx,ty){return tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H&&!!state.buildingGrid[tileKey(tx,ty)]}
+function getBuildingAt(tx,ty){return(tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H)?state.buildingGrid[tileKey(tx,ty)]:null}
+function getBuildingOwner(x,y){
+ for(let b of state.buildings){if(x>=b.x&&x<b.x+b.w&&y>=b.y&&y<b.y+b.h)return b}
  return null;
 }
-// Determine which side of building a wall tile is on
+
 function getWallSide(bld,x,y){
  if(y===bld.y)return 'top';
  if(y===bld.y+bld.h-1)return 'bottom';
@@ -80,12 +99,12 @@ function isWallBetween(x1,y1,x2,y2){
   if(cx>=0&&cy>=0&&cx<MAP_W&&cy<MAP_H){
    let t=state.map[cy][cx];
    if(t===1||t===5)return true;
+   if(t===3){let door=doorAt(cx,cy);if(door&&door.barricaded&&!door.open)return true}
   }
  }
  return false;
 }
 
-// Get spread at a given distance for a weapon
 function getSpreadAtDist(wep,precision,d){
  let base=(wep.baseSpread||0.05)*(6-precision)/5;
  return base+DIST_SPREAD_FACTOR*d;
@@ -95,37 +114,28 @@ function getSpreadAtDist(wep,precision,d){
 function drawHumanoid(ctx,cx,cy,s,angle,opts){
  ctx.save();ctx.translate(cx,cy);ctx.rotate(angle);
  let u=s/32;
- let walk=opts.walkPhase||0; // 0..1 cycle
+ let walk=opts.walkPhase||0;
  let legOff=Math.sin(walk*Math.PI*2)*3*u;
  ctx.fillStyle='rgba(0,0,0,0.35)';
  ctx.beginPath();ctx.ellipse(0,3*u,11*u,5*u,0,0,Math.PI*2);ctx.fill();
- // Legs (animated)
  ctx.fillStyle=opts.legs||'#2a2a2a';
  ctx.fillRect(-3*u,2*u+legOff,4*u,8*u);ctx.fillRect(1*u,2*u-legOff,4*u,8*u);
  ctx.fillStyle=opts.boots||'#1a1a1a';
  ctx.fillRect(-3*u,8*u+legOff,4*u,3*u);ctx.fillRect(1*u,8*u-legOff,4*u,3*u);
- // Body (slight bob)
  let bodyBob=Math.abs(Math.sin(walk*Math.PI*2))*1.5*u;
  ctx.fillStyle=opts.body;ctx.fillRect(-7*u,-7*u-bodyBob,14*u,14*u);
  if(opts.vest){ctx.fillStyle=opts.vest;ctx.fillRect(-7*u,-7*u-bodyBob,3*u,14*u);ctx.fillRect(4*u,-7*u-bodyBob,3*u,14*u)}
  if(opts.pocket){ctx.fillStyle=opts.pocket;ctx.fillRect(-2*u,-4*u-bodyBob,4*u,6*u)}
- // Arms
  ctx.fillStyle=opts.arms||opts.body;
  let armExt=opts.armExtend||0;
  let armSwing=Math.sin(walk*Math.PI*2)*2*u;
  ctx.fillRect(7*u,-5*u-bodyBob+armSwing,4*u+armExt,10*u);ctx.fillRect(-11*u,-5*u-bodyBob-armSwing,4*u,10*u);
  ctx.fillStyle=opts.gloves||opts.skin||'#1a1a1a';
  ctx.fillRect(7*u+armExt,3*u-bodyBob+armSwing,4*u,4*u);ctx.fillRect(-11*u,3*u-bodyBob-armSwing,4*u,4*u);
- // Head
  ctx.fillStyle=opts.skin||'#d4a870';ctx.fillRect(-5*u,-14*u-bodyBob,10*u,9*u);
  if(opts.helmet){ctx.fillStyle=opts.helmet;ctx.fillRect(-6*u,-16*u-bodyBob,12*u,5*u);ctx.fillStyle=opts.helmetRim||opts.helmet;ctx.fillRect(-6*u,-12*u-bodyBob,12*u,2*u)}
- // Eye
  ctx.fillStyle=opts.eyeColor||'#111';ctx.fillRect(3*u,-13*u-bodyBob,2*u,2*u);
  ctx.fillStyle=opts.skin||'#d4a870';ctx.fillRect(2*u,-9*u-bodyBob,3*u,1*u);
- // Scale indicator (boss)
- if(opts.scale&&opts.scale>1){
-  ctx.fillStyle='rgba(255,0,0,0.15)';ctx.beginPath();ctx.arc(0,0,14*u,0,Math.PI*2);ctx.fill();
- }
  ctx.restore();
 }
 
@@ -137,7 +147,6 @@ function drawPlayer(ctx,cx,cy,s,angle,swingAnim,player){
   arms:'#3a4a2a',gloves:'#1a1a1a',skin:'#d4a870',
   helmet:'#3a4a2a',helmetRim:'#2a3a1a',walkPhase
  });
- // Weapon on top
  ctx.save();ctx.translate(cx,cy);ctx.rotate(angle);
  let u=s/32;
  let sel=player.inventory[player.selectedSlot];
@@ -181,7 +190,6 @@ function drawNPC(ctx,cx,cy,s,angle,npc){
   skin:'#d4a870',helmet:npc.isLeader?'#5a4a3a':'#3a3a4a',
   helmetRim:npc.isLeader?'#4a3a2a':'#2a2a3a',walkPhase
  });
- // Weapon
  ctx.save();ctx.translate(cx,cy);ctx.rotate(angle);
  let u=s/32;
  if(wepName==='bat'){
@@ -209,47 +217,39 @@ function drawZombie(ctx,cx,cy,s,angle,variant,atkAnim,isBoss,isMoving){
  let bodyBob=isMoving?Math.abs(Math.sin(walk*Math.PI*2))*1.5*u:0;
  ctx.fillStyle='rgba(0,0,0,0.35)';
  ctx.beginPath();ctx.ellipse(0,3*u,11*u,5*u,0,0,Math.PI*2);ctx.fill();
- // Legs
  let legCol=variant===0?'#3a3030':'#2a3a30';
  ctx.fillStyle=legCol;
  ctx.fillRect(-3*u,2*u+legOff,4*u,8*u);ctx.fillRect(1*u,2*u-legOff,4*u,8*u);
- // Body
  let bc=variant===0?'#4a3030':'#3a4030';
  let bc2=variant===0?'#5a3838':'#4a5038';
  ctx.fillStyle=bc;ctx.fillRect(-7*u,-8*u-bodyBob,14*u,14*u);
  ctx.fillStyle=bc2;ctx.fillRect(-7*u,-8*u-bodyBob,14*u,3*u);
  ctx.fillStyle=variant===0?'#3a2020':'#2a3020';
  ctx.fillRect(-2*u,-3*u-bodyBob,6*u,4*u);
- // Arms - attack animation: both arms lunge forward + spread
  let armReach=atkAnim>0?ZOMBIE_ATK_RANGE*s/2*atkAnim:0;
  let armSpread=atkAnim>0?atkAnim*3*u:0;
  let armSwing=isMoving&&atkAnim<=0?Math.sin(walk*Math.PI*2)*2*u:0;
  ctx.fillStyle='#5a7a50';
  ctx.fillRect(7*u,-4*u-bodyBob-armSpread+armSwing,4*u+armReach,8*u);
  ctx.fillRect(-11*u,-4*u-bodyBob+armSpread-armSwing,4*u+(atkAnim>0?armReach*0.6:0),8*u);
- // Claws
  ctx.fillStyle='#4a6a40';
  ctx.fillRect(9*u+armReach,-5*u-bodyBob-armSpread,5*u,3*u);ctx.fillRect(9*u+armReach,2*u-bodyBob-armSpread,5*u,3*u);
  if(atkAnim>0){
-  // Second arm claws too
   ctx.fillRect(-11*u+armReach*0.6,-5*u-bodyBob+armSpread,5*u,3*u);
   ctx.fillRect(-11*u+armReach*0.6,2*u-bodyBob+armSpread,5*u,3*u);
  }else{
   ctx.fillRect(-11*u,-5*u-bodyBob,3*u,3*u);
  }
- // Head
  ctx.fillStyle=isBoss?'#5a6a50':'#6a8a60';ctx.fillRect(-5*u,-15*u-bodyBob,10*u,9*u);
  ctx.fillStyle='#5a7a50';ctx.fillRect(-5*u,-8*u-bodyBob,10*u,2*u);
  ctx.fillStyle='#4a6a40';ctx.fillRect(-3*u,-14*u-bodyBob,3*u,3*u);
  ctx.fillStyle=isBoss?'#ff0':'#f22';ctx.fillRect(2*u,-13*u-bodyBob,3*u,3*u);
- // Attack face: open jaw + teeth + blood drool
  if(atkAnim>0){
   let jawOpen=atkAnim*4*u;
   ctx.fillStyle='#300';ctx.fillRect(0*u,-8*u-bodyBob,5*u,3*u+jawOpen);
   ctx.fillStyle='#fff';
   ctx.fillRect(1*u,-8*u-bodyBob,1*u,1.5*u);ctx.fillRect(3*u,-8*u-bodyBob,1*u,1.5*u);
   ctx.fillRect(1*u,-6*u-bodyBob+jawOpen,1*u,1.5*u);ctx.fillRect(3*u,-6*u-bodyBob+jawOpen,1*u,1.5*u);
-  // Blood drool
   ctx.fillStyle='rgba(180,0,0,0.6)';ctx.fillRect(2*u,-5*u-bodyBob+jawOpen,1*u,2*u+atkAnim*2*u);
  }
  if(isBoss){
@@ -266,11 +266,11 @@ function initPlayer(){
   x:Math.floor(MAP_W/2),y:Math.floor(MAP_H/2),
   hp:BASE_HP_PLAYER+pvStat*5,maxHp:BASE_HP_PLAYER+pvStat*5,
   pvStat,atk:rand(1,5),armor:rand(1,5),precision:rand(1,5),speed:rand(1,5),
-  inventory:[{type:'weapon',name:'bat',ammo:0},null,null,null],
+  inventory:[{type:'weapon',name:'bat',ammo:0},null,null,null,null],
   selectedSlot:0,cooldown:0,angle:0,
   fx:Math.floor(MAP_W/2),fy:Math.floor(MAP_H/2),
   swingTimer:0,swingDuration:15,hitSlowTimer:0,isAttacking:false,
-  postAttackSlow:0,xp:0,level:1,ammo:0
+  postAttackSlow:0,xp:0,level:1,ammo:0,smgHeat:0
  };
 }
 
@@ -319,22 +319,26 @@ function statName(s){
  switch(s){case 'pvStat':return'PV';case 'atk':return'ATK';case 'armor':return'ARM';case 'precision':return'PRE';case 'speed':return'VIT'}return s;
 }
 
+// Zombie scaling: stronger with map progression
+function getZombieLevel(){return 1+Math.floor(state.mapCount*0.5)}
+
 function makeZombie(x,y,level){
- let lv=level||1;
+ let lv=level||getZombieLevel();
  let pvStat=rand(1,10)*lv;
  let hp=BASE_HP_ZOMBIE+pvStat*5;
- return{x,y,hp,maxHp:hp,atk:rand(1,10)*lv,armor:rand(1,10),precision:rand(1,10),
-  speed:Math.max(1,rand(1,3)),fx:x,fy:y,
-  cooldown:0,atkCooldown:60,atkTimer:0,atkDuration:15,
+ return{x,y,hp,maxHp:hp,atk:rand(1,10)*lv,armor:rand(1,5)+lv*2,precision:rand(1,8)+lv,
+  speed:Math.max(1,rand(1,3)+Math.floor(lv/3)),fx:x,fy:y,
+  cooldown:0,atkCooldown:Math.max(30,60-lv*3),atkTimer:0,atkDuration:15,
   alive:true,alerted:false,variant:rand(0,1),
   angle:Math.random()*Math.PI*2,hitSlowTimer:0,isAttacking:false,
   postAttackSlow:0,isBoss:false};
 }
 
 function makeBossZombie(x,y){
- let hp=400;
- return{x,y,hp,maxHp:hp,atk:30,armor:20,precision:8,
-  speed:2,fx:x,fy:y,
+ let lv=getZombieLevel();
+ let hp=300+lv*50;
+ return{x,y,hp,maxHp:hp,atk:20+lv*5,armor:15+lv*3,precision:8,
+  speed:2+Math.floor(lv/4),fx:x,fy:y,
   cooldown:0,atkCooldown:50,atkTimer:0,atkDuration:20,
   alive:true,alerted:true,variant:0,
   angle:0,hitSlowTimer:0,isAttacking:false,
@@ -345,7 +349,7 @@ function makeNPC(x,y,weapon,isLeader){
  let hp=isLeader?80:40;
  return{x,y,fx:x,fy:y,hp,maxHp:hp,
   atk:isLeader?5:2,armor:isLeader?5:2,precision:isLeader?6:3,speed:isLeader?3:2,
-  weapon,isLeader,alive:true,angle:0,
+  weapon,isLeader,alive:true,angle:0,_moving:false,
   cooldown:0,atkCooldown:weapon==='bat'?30:25,
   level:isLeader?3:1,questActive:false};
 }
@@ -354,15 +358,44 @@ function genMap(){
  state.map=Array.from({length:MAP_H},()=>Array(MAP_W).fill(0));
  state.buildings=[];state.doors=[];state.items=[];state.zombies=[];
  state.bullets=[];state.barrels=[];state.cityWalls=[];
- state.npcs=[];state.rockWarnings=[];state.rocks=[];
+ state.npcs=[];state.rockWarnings=[];state.rocks=[];state.explosions=[];state.dmgFloaters=[];
  state.baseBoss=null;state.baseEventActive=false;state.baseRewardGiven=false;
  let{map,buildings,doors,items,zombies,player}=state;
 
- // Is this a base defense level?
- let isBaseLevel=player.level>1&&(player.level%5===0);
+ let isBaseLevel=(state.mapCount+1)%5===0&&state.mapCount>0;
  state.baseEvent=isBaseLevel;
 
- let attempts=0,targetBuildings=isBaseLevel?rand(3,4):rand(6,10);
+ // Generate buildings - base level gets a large HQ first
+ let attempts=0,targetBuildings=isBaseLevel?rand(4,6):rand(6,10);
+
+ // For base level, generate the HQ (largest building) first
+ if(isBaseLevel){
+  let placed=false;
+  for(let a=0;a<200&&!placed;a++){
+   let w=rand(10,14),h=rand(8,11),bx=rand(2,MAP_W-w-2),by=rand(2,MAP_H-h-2);
+   let ok=true;
+   for(let b of buildings){if(bx<b.x+b.w+2&&bx+w+2>b.x&&by<b.y+b.h+2&&by+h+2>b.y){ok=false;break}}
+   if(!ok)continue;
+   for(let y=by;y<by+h;y++)for(let x=bx;x<bx+w;x++){
+    map[y][x]=(y===by||y===by+h-1||x===bx||x===bx+w-1)?1:2;
+   }
+   let bld={x:bx,y:by,w,h,secured:false,searched:false,isHQ:true};
+   buildings.push(bld);
+   // Multiple reinforced doors (one per side)
+   let doorPositions=[
+    {x:rand(bx+2,bx+w-3),y:by},
+    {x:rand(bx+2,bx+w-3),y:by+h-1},
+    {x:bx,y:rand(by+2,by+h-3)},
+    {x:bx+w-1,y:rand(by+2,by+h-3)}
+   ];
+   for(let dp of doorPositions){
+    map[dp.y][dp.x]=3;
+    doors.push({x:dp.x,y:dp.y,barricaded:true,open:false,building:bld,doorHp:5,maxDoorHp:5});
+   }
+   placed=true;
+  }
+ }
+
  while(buildings.length<targetBuildings&&attempts<400){
   attempts++;
   let w=rand(4,8),h=rand(4,7),bx=rand(1,MAP_W-w-1),by=rand(1,MAP_H-h-1);
@@ -382,7 +415,6 @@ function genMap(){
   doors.push({x:doorPos.x,y:doorPos.y,barricaded:false,open:false,building:buildings[buildings.length-1]});
  }
 
- // City walls
  for(let i=0;i<rand(8,16);i++){
   let horizontal=Math.random()<0.5;
   let len=rand(3,8);
@@ -391,6 +423,12 @@ function genMap(){
   for(let j=0;j<len;j++){
    let cx=horizontal?wx+j:wx,cy=horizontal?wy:wy+j;
    if(map[cy][cx]!==0){valid=false;break}
+   // Check adjacency to doors to avoid blocking entrances
+   for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+    let nx=cx+dx,ny=cy+dy;
+    if(nx>=0&&ny>=0&&nx<MAP_W&&ny<MAP_H&&map[ny][nx]===3){valid=false;break}
+   }
+   if(!valid)break;
   }
   if(!valid)continue;
   for(let j=0;j<len;j++){
@@ -412,46 +450,102 @@ function genMap(){
   items.push({x:lx,y:ly,type:Math.random()<0.5?'ammo':'bandage'});
  }
  for(let i=0;i<rand(10,20);i++){
-  let x,y;do{x=rand(0,MAP_W-1);y=rand(0,MAP_H-1)}while(map[y][x]!==0);
-  items.push({x,y,type:'material'});
+  let x,y,tries=0;
+  do{x=rand(0,MAP_W-1);y=rand(0,MAP_H-1);tries++}while(map[y][x]!==0&&tries<100);
+  if(tries<100)items.push({x,y,type:'material'});
  }
 
+ // Zombie count scales with progression (halved)
+ let baseZCount=rand(6,12);
+ let zombieCount=baseZCount+state.mapCount;
+
  if(!isBaseLevel){
-  // Normal map: zombies + escape
-  for(let i=0;i<rand(12,24);i++){
-   let x,y;do{x=rand(0,MAP_W-1);y=rand(0,MAP_H-1)}while(map[y][x]!==0||dist({x,y},player)<SAFE_SPAWN_RADIUS);
-   zombies.push(makeZombie(x,y));
+  // 50% in wandering groups of 2-5
+  let groupCount=Math.floor(zombieCount/2);
+  let spawned=0;
+  while(spawned<groupCount){
+   let groupSize=rand(2,5);
+   let cx,cy,tries=0;
+   do{cx=rand(2,MAP_W-3);cy=rand(2,MAP_H-3);tries++}while((map[cy][cx]!==0||dist({x:cx,y:cy},player)<SAFE_SPAWN_RADIUS)&&tries<100);
+   if(tries>=100)break;
+   let groupId=Math.random();
+   for(let g=0;g<groupSize&&spawned<groupCount;g++){
+    let gx=cx+rand(-2,2),gy=cy+rand(-2,2);
+    gx=Math.max(0,Math.min(MAP_W-1,gx));gy=Math.max(0,Math.min(MAP_H-1,gy));
+    if(map[gy][gx]!==0)continue;
+    let z=makeZombie(gx,gy);
+    z.wanderGroup=groupId;z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(60,180);
+    zombies.push(z);spawned++;
+   }
+  }
+  // 50% solo near/in buildings
+  let soloCount=zombieCount-spawned;
+  for(let i=0;i<soloCount;i++){
+   let x,y,tries=0;
+   if(buildings.length>0){
+    let b=buildings[rand(0,buildings.length-1)];
+    // Try spawning inside or just outside the building
+    do{
+     if(Math.random()<0.4){
+      x=rand(b.x+1,b.x+b.w-2);y=rand(b.y+1,b.y+b.h-2);
+     }else{
+      x=rand(b.x-2,b.x+b.w+1);y=rand(b.y-2,b.y+b.h+1);
+     }
+     tries++;
+    }while((x<0||y<0||x>=MAP_W||y>=MAP_H||map[y][x]===1||map[y][x]===5||dist({x,y},player)<SAFE_SPAWN_RADIUS)&&tries<50);
+   }else{
+    do{x=rand(0,MAP_W-1);y=rand(0,MAP_H-1);tries++}while((map[y][x]!==0||dist({x,y},player)<SAFE_SPAWN_RADIUS)&&tries<100);
+   }
+   if(tries<100)zombies.push(makeZombie(x,y));
   }
   for(let i=0;i<rand(1,MAX_BARRELS);i++){
    let x,y,tries=0;
    do{x=rand(1,MAP_W-2);y=rand(1,MAP_H-2);tries++}while((map[y][x]!==0||dist({x,y},player)<SAFE_SPAWN_RADIUS)&&tries<50);
    if(tries<50)state.barrels.push({x,y,fx:x,fy:y,hp:20,alive:true});
   }
-  let ex,ey;
-  do{ex=rand(0,MAP_W-1);ey=rand(0,MAP_H-1)}while(map[ey][ex]!==0||dist({x:ex,y:ey},player)<15);
+  let ex,ey,tries=0;
+  do{ex=rand(0,MAP_W-1);ey=rand(0,MAP_H-1);tries++}while((map[ey][ex]!==0||dist({x:ex,y:ey},player)<15)&&tries<200);
   state.escapeZone={x:ex,y:ey};map[ey][ex]=4;
  }else{
-  // Base defense map: NPCs + leader, no escape until event done
-  state.escapeZone={x:-10,y:-10}; // hidden
-  let baseBld=buildings[0];
-  // Spawn NPCs around the base building
-  let npcCount=rand(3,5);
-  for(let i=0;i<npcCount;i++){
+  state.escapeZone={x:-10,y:-10};
+  let baseBld=buildings[0]; // HQ is always first building
+  let npcCount=rand(5,8);
+  let insideCount=Math.ceil(npcCount*0.6);
+  let outsideCount=npcCount-insideCount;
+  // 60% inside the HQ with pistols
+  for(let i=0;i<insideCount;i++){
    let nx=baseBld.x+rand(1,baseBld.w-2),ny=baseBld.y+rand(1,baseBld.h-2);
-   let wpn=Math.random()<0.5?'bat':'gun';
-   state.npcs.push(makeNPC(nx,ny,wpn,false));
+   state.npcs.push(makeNPC(nx,ny,'gun',false));
   }
-  // Leader
+  // Leader inside with shotgun
   let lx=baseBld.x+Math.floor(baseBld.w/2),ly=baseBld.y+Math.floor(baseBld.h/2);
   let leader=makeNPC(lx,ly,'shotgun',true);
   state.npcs.push(leader);
-  // Some barrels
+  // 40% outside in patrol groups of 2
+  for(let i=0;i<outsideCount;i+=2){
+   let px,py,tries=0;
+   do{px=baseBld.x+rand(-4,baseBld.w+3);py=baseBld.y+rand(-4,baseBld.h+3);tries++}
+   while((px<0||py<0||px>=MAP_W||py>=MAP_H||map[py][px]!==0||isInBuilding(px,py))&&tries<50);
+   if(tries>=50)continue;
+   let patrolId=Math.random();
+   for(let g=0;g<2&&i+g<outsideCount;g++){
+    let ox=px+rand(-1,1),oy=py+rand(-1,1);
+    ox=Math.max(0,Math.min(MAP_W-1,ox));oy=Math.max(0,Math.min(MAP_H-1,oy));
+    if(map[oy][ox]===1||map[oy][ox]===5){ox=px;oy=py}
+    let npc=makeNPC(ox,oy,'gun',false);
+    npc.patrolGroup=patrolId;npc.wanderAngle=Math.random()*Math.PI*2;npc.wanderTimer=rand(60,180);
+    npc.patrolCenterX=baseBld.x+baseBld.w/2;npc.patrolCenterY=baseBld.y+baseBld.h/2;
+    state.npcs.push(npc);
+   }
+  }
   for(let i=0;i<rand(1,2);i++){
    let x,y,tries=0;
    do{x=rand(1,MAP_W-2);y=rand(1,MAP_H-2);tries++}while((map[y][x]!==0)&&tries<50);
    if(tries<50)state.barrels.push({x,y,fx:x,fy:y,hp:20,alive:true});
   }
  }
+
+ rebuildSpatialMaps();
 }
 
 function spawnPlayerInBuilding(){
@@ -471,6 +565,25 @@ function alertZombiesNear(px,py,radius){
   z.alerted=true;
  }
 }
+function gunShotSpawnZombies(weaponName){
+ if(state.tick-state.lastGunSpawnTick<GUNSHOT_SPAWN_COOLDOWN)return;
+ let count=GUNSHOT_SPAWN_COUNT[weaponName]||0;
+ if(count<=0)return;
+ state.lastGunSpawnTick=state.tick;
+ let cam=state.cam,s=TILE*state.scale;
+ let camLeft=cam.x/s,camTop=cam.y/s;
+ let camRight=camLeft+state.W/s,camBot=camTop+state.H/s;
+ for(let i=0;i<count;i++){
+  let side=rand(0,3),x,y;
+  if(side===0){x=rand(Math.floor(camLeft),Math.floor(camRight));y=Math.max(0,Math.floor(camTop)-1)}
+  else if(side===1){x=rand(Math.floor(camLeft),Math.floor(camRight));y=Math.min(MAP_H-1,Math.floor(camBot)+1)}
+  else if(side===2){x=Math.max(0,Math.floor(camLeft)-1);y=rand(Math.floor(camTop),Math.floor(camBot))}
+  else{x=Math.min(MAP_W-1,Math.floor(camRight)+1);y=rand(Math.floor(camTop),Math.floor(camBot))}
+  x=Math.max(0,Math.min(MAP_W-1,x));y=Math.max(0,Math.min(MAP_H-1,y));
+  let z=makeZombie(x,y);z.alerted=true;
+  state.zombies.push(z);
+ }
+}
 function getSpeedMult(entity){
  let m=1;
  if(entity.isAttacking)m*=0.75;
@@ -485,35 +598,44 @@ function zombieDrop(x,y){
 }
 function canWalk(tx,ty){
  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;
- let t=state.map[ty][tx];return t!==1&&t!==5;
+ let t=state.map[ty][tx];
+ if(t===1||t===5)return false;
+ if(t===3){let door=doorAt(tx,ty);if(door&&door.barricaded&&!door.open)return false}
+ return true;
 }
 
+// Iterative barrel explosion to prevent stack overflow
 function explodeBarrel(barrel){
- barrel.alive=false;
- let bx=barrel.fx,by=barrel.fy;
- for(let z of state.zombies){
-  if(!z.alive)continue;
-  let d=dist({x:bx,y:by},{x:z.fx,y:z.fy});
-  if(d<BARREL_EXPLOSION_RADIUS){
-   let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-d/BARREL_EXPLOSION_RADIUS)));
-   z.hp-=dmg;z.alerted=true;z.hitSlowTimer=HIT_SLOW_DURATION;
-   if(z.hp<=0){z.alive=false;zombieDrop(z.x,z.y);addXP(state.player,XP_PER_KILL)}
+ let queue=[barrel];
+ while(queue.length>0){
+  let b=queue.shift();
+  if(!b.alive)continue;
+  b.alive=false;
+  let bx=b.fx,by=b.fy;
+  for(let z of state.zombies){
+   if(!z.alive)continue;
+   let d=dist({x:bx,y:by},{x:z.fx,y:z.fy});
+   if(d<BARREL_EXPLOSION_RADIUS){
+    let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-d/BARREL_EXPLOSION_RADIUS)));
+    z.hp-=dmg;z.alerted=true;z.hitSlowTimer=HIT_SLOW_DURATION;
+    addFloater(z.fx,z.fy,'-'+dmg,'#f80');
+    if(z.hp<=0){z.alive=false;zombieDrop(z.x,z.y);addXP(state.player,XP_PER_KILL);state.kills++}
+   }
   }
+  let pd=dist({x:bx,y:by},{x:state.player.fx,y:state.player.fy});
+  if(pd<BARREL_EXPLOSION_RADIUS){
+   let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-pd/BARREL_EXPLOSION_RADIUS)));
+   state.player.hp-=dmg;state.player.hitSlowTimer=HIT_SLOW_DURATION;
+   addFloater(state.player.fx,state.player.fy,'-'+dmg,'#f44');
+   if(state.player.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
+  }
+  for(let ob of state.barrels){
+   if(!ob.alive||ob===b)continue;
+   if(dist({x:bx,y:by},{x:ob.fx,y:ob.fy})<BARREL_EXPLOSION_RADIUS)queue.push(ob);
+  }
+  alertZombiesNear(bx,by,GUNSHOT_ALERT_RADIUS);
+  state.explosions.push({x:bx,y:by,timer:20});
  }
- let pd=dist({x:bx,y:by},{x:state.player.fx,y:state.player.fy});
- if(pd<BARREL_EXPLOSION_RADIUS){
-  let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-pd/BARREL_EXPLOSION_RADIUS)));
-  state.player.hp-=dmg;state.player.hitSlowTimer=HIT_SLOW_DURATION;
-  msg('Explosion! -'+dmg+' PV');
-  if(state.player.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
- }
- for(let ob of state.barrels){
-  if(!ob.alive||ob===barrel)continue;
-  if(dist({x:bx,y:by},{x:ob.fx,y:ob.fy})<BARREL_EXPLOSION_RADIUS)explodeBarrel(ob);
- }
- alertZombiesNear(bx,by,GUNSHOT_ALERT_RADIUS);
- state.explosions=state.explosions||[];
- state.explosions.push({x:bx,y:by,timer:20});
 }
 
 function getWeaponDef(sel){
@@ -533,12 +655,17 @@ function meleeAttack(p){
    let toZ=Math.atan2(z.fy-p.fy,z.fx-p.fx);
    let diff=Math.abs(toZ-p.angle);if(diff>Math.PI)diff=2*Math.PI-diff;
    if(diff<arc/2){
-    if(Math.random()*10<p.precision+3){
-     let dmg=Math.max(1,wep.dmg+p.atk+3-Math.floor(z.armor/4));
+    let hitChance=wep.melee?0.99:(p.precision+3)/10;
+    if(Math.random()<hitChance){
+     let dmg=Math.max(1,wep.dmg+p.atk+3-Math.floor(z.armor/3));
      z.hp-=dmg;z.alerted=true;z.hitSlowTimer=HIT_SLOW_DURATION;
-     msg('Touche! -'+dmg+' PV');
-     if(z.hp<=0){z.alive=false;zombieDrop(z.x,z.y);addXP(p,XP_PER_KILL);msg('Zombie elimine!')}
-    }else msg('Rate!');
+     addFloater(z.fx,z.fy,'-'+dmg,'#fc0');
+     if(z.hp<=0){
+      z.alive=false;zombieDrop(z.x,z.y);state.kills++;
+      addXP(p,z.isBoss?XP_PER_KILL*XP_BOSS_MULT:XP_PER_KILL);
+      addFloater(z.fx,z.fy-0.5,'KILL','#f44');
+     }
+    }else{addFloater(z.fx,z.fy,'Rate','#888')}
    }
   }
  }
@@ -555,19 +682,30 @@ function meleeAttack(p){
 
 function shootOneBullet(p,wep,shotAngle){
  let adx=Math.cos(shotAngle),ady=Math.sin(shotAngle),range=wep.range;
- state.bullets.push({x:p.fx,y:p.fy,angle:shotAngle,maxDist:range,life:8});
- for(let i=1;i<range;i++){
-  let sx=Math.floor(p.fx+0.5+adx*i),sy=Math.floor(p.fy+0.5+ady*i);
-  if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H)break;
-  let t=state.map[sy][sx];if(t===1||t===5)break;
-  let hitBarrel=state.barrels.find(b=>b.alive&&dist({x:b.fx,y:b.fy},{x:p.fx+0.5+adx*i,y:p.fy+0.5+ady*i})<0.8);
-  if(hitBarrel){hitBarrel.hp-=10;if(hitBarrel.hp<=0)explodeBarrel(hitBarrel);return true}
-  let hit=state.zombies.find(z=>z.alive&&dist({x:z.fx,y:z.fy},{x:p.fx+0.5+adx*i,y:p.fy+0.5+ady*i})<0.8);
+ let bullet={x:p.fx,y:p.fy,angle:shotAngle,maxDist:range,hitDist:range,life:8};
+ state.bullets.push(bullet);
+ // Finer raycast steps for diagonal accuracy
+ let steps=Math.ceil(range*2);
+ for(let i=1;i<=steps;i++){
+  let rd=i*range/steps;
+  let sx=Math.floor(p.fx+0.5+adx*rd),sy=Math.floor(p.fy+0.5+ady*rd);
+  if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H){bullet.hitDist=rd;break}
+  let t=state.map[sy][sx];if(t===1||t===5){bullet.hitDist=rd;break}
+  if(t===3){let door=doorAt(sx,sy);if(door&&door.barricaded&&!door.open){bullet.hitDist=rd;break}}
+  let px2=p.fx+0.5+adx*rd,py2=p.fy+0.5+ady*rd;
+  let hitBarrel=state.barrels.find(b=>b.alive&&dist({x:b.fx,y:b.fy},{x:px2,y:py2})<0.8);
+  if(hitBarrel){bullet.hitDist=rd;hitBarrel.hp-=10;if(hitBarrel.hp<=0)explodeBarrel(hitBarrel);return true}
+  let hit=state.zombies.find(z=>z.alive&&dist({x:z.fx,y:z.fy},{x:px2,y:py2})<0.8);
   if(hit){
+   bullet.hitDist=rd;
    let dmg=Math.max(1,wep.dmg+p.atk-Math.floor(hit.armor/3));
    hit.hp-=dmg;hit.hitSlowTimer=HIT_SLOW_DURATION;hit.alerted=true;
-   msg('Tir touche! -'+dmg);
-   if(hit.hp<=0){hit.alive=false;zombieDrop(hit.x,hit.y);addXP(p,XP_PER_KILL);msg('Zombie abattu!')}
+   addFloater(hit.fx,hit.fy,'-'+dmg,'#fc0');
+   if(hit.hp<=0){
+    hit.alive=false;zombieDrop(hit.x,hit.y);state.kills++;
+    addXP(p,hit.isBoss?XP_PER_KILL*XP_BOSS_MULT:XP_PER_KILL);
+    addFloater(hit.fx,hit.fy-0.5,'KILL','#f44');
+   }
    return true;
   }
  }
@@ -579,11 +717,13 @@ function shootAttack(p){
  let wep=getWeaponDef(sel);if(!wep)return;
  p.cooldown=Math.max(4,wep.cooldown-Math.floor(p.speed));
  alertZombiesNear(p.fx,p.fy,GUNSHOT_ALERT_RADIUS);
- // Calculate mouse distance for spread
+ gunShotSpawnZombies(wep.name);
  let s=TILE*state.scale;
  let pwx=p.fx*s-state.cam.x+s/2,pwy=p.fy*s-state.cam.y+s/2;
  let mouseDist=Math.hypot(state.mouseX-pwx,state.mouseY-pwy)/s;
  let spreadAtDist=getSpreadAtDist(wep,p.precision,mouseDist);
+ // SMG heat increases spread
+ if(wep.name==='smg')spreadAtDist+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
 
  if(wep.pellets){
   let anyHit=false;
@@ -591,10 +731,10 @@ function shootAttack(p){
    let spread=(Math.random()-0.5)*2*spreadAtDist;
    if(shootOneBullet(p,wep,p.angle+spread))anyHit=true;
   }
-  if(!anyHit)msg('Tirs rates!');
+  if(!anyHit)addFloater(p.fx+Math.cos(p.angle)*2,p.fy+Math.sin(p.angle)*2,'Rate','#888');
  }else{
   let spread=(Math.random()-0.5)*2*spreadAtDist;
-  if(!shootOneBullet(p,wep,p.angle+spread))msg('Tir rate!');
+  if(!shootOneBullet(p,wep,p.angle+spread))addFloater(p.fx+Math.cos(p.angle)*2,p.fy+Math.sin(p.angle)*2,'Rate','#888');
  }
 }
 
@@ -608,77 +748,89 @@ function findNearestInteractable(p){
  return best;
 }
 
+// What can the player interact with right now? (for prompt display)
+function getNearestInteraction(p){
+ // Leader
+ if(state.baseEvent&&!state.baseEventActive){
+  let leader=state.npcs.find(n=>n.alive&&n.isLeader);
+  if(leader&&dist({x:p.fx,y:p.fy},{x:leader.fx,y:leader.fy})<INTERACT_RANGE)return{type:'leader'};
+ }
+ // Barricaded door
+ let rdoor=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&d.barricaded);
+ if(rdoor)return{type:'door',label:rdoor.open?'Fermer':'Ouvrir'};
+ // Item
+ let item=findNearestInteractable(p);
+ if(item)return{type:'item',item:item.item};
+ // Unbarricaded door
+ let udoor=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&!d.barricaded);
+ if(udoor)return{type:'repair',mats:getMaterials(p)};
+ // Escape
+ if(!state.baseEvent||!state.baseEventActive){
+  if(dist({x:p.fx,y:p.fy},{x:state.escapeZone.x+0.5,y:state.escapeZone.y+0.5})<INTERACT_RANGE)return{type:'escape'};
+ }
+ return null;
+}
+
 // NPC AI
 function updateNPC(npc){
  if(!npc.alive)return;
- // Find nearest zombie
  let nearestZ=null,nd=Infinity;
  for(let z of state.zombies){
   if(!z.alive)continue;
   let d=dist({x:npc.fx,y:npc.fy},{x:z.fx,y:z.fy});
   if(d<nd){nearestZ=z;nd=d}
  }
- if(!nearestZ)return;
+ if(!nearestZ){npc._moving=false;return}
  npc.angle=Math.atan2(nearestZ.fy-npc.fy,nearestZ.fx-npc.fx);
 
  let wep=WEAPONS[npc.weapon];
  let range=wep?wep.range:2;
- // Move toward zombie if too far
  if(nd>range*0.7){
+  npc._moving=true;
   let spd=0.02+npc.speed*0.005;
   let adx=nearestZ.fx-npc.fx,ady=nearestZ.fy-npc.fy,len=Math.hypot(adx,ady)||1;
   let nx=npc.fx+adx/len*spd,ny=npc.fy+ady/len*spd;
   if(canWalk(Math.floor(nx+0.5),Math.floor(npc.fy+0.5)))npc.fx=nx;
   if(canWalk(Math.floor(npc.fx+0.5),Math.floor(ny+0.5)))npc.fy=ny;
   npc.x=Math.floor(npc.fx+0.5);npc.y=Math.floor(npc.fy+0.5);
- }
+ }else{npc._moving=false}
 
- // Attack
  if(npc.cooldown>0){npc.cooldown--;return}
  if(wep&&wep.melee&&nd<wep.range){
   npc.cooldown=wep.cooldown;
   if(Math.random()*10<npc.precision+2){
    let dmg=Math.max(1,wep.dmg+npc.atk);
    nearestZ.hp-=dmg;nearestZ.alerted=true;nearestZ.hitSlowTimer=HIT_SLOW_DURATION;
-   if(nearestZ.hp<=0){nearestZ.alive=false;zombieDrop(nearestZ.x,nearestZ.y);addXP(state.player,XP_PER_KILL)}
+   if(nearestZ.hp<=0){nearestZ.alive=false;zombieDrop(nearestZ.x,nearestZ.y);addXP(state.player,XP_PER_KILL);state.kills++}
   }
  }else if(wep&&!wep.melee&&nd<wep.range){
   npc.cooldown=wep.cooldown;
-  // NPC shoots
   let adx=Math.cos(npc.angle),ady=Math.sin(npc.angle);
-  state.bullets.push({x:npc.fx,y:npc.fy,angle:npc.angle,maxDist:wep.range,life:6});
+  let npcBullet={x:npc.fx,y:npc.fy,angle:npc.angle,maxDist:wep.range,hitDist:wep.range,life:6};
+  state.bullets.push(npcBullet);
   for(let i=1;i<wep.range;i++){
    let sx=Math.floor(npc.fx+0.5+adx*i),sy=Math.floor(npc.fy+0.5+ady*i);
-   if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H)break;
-   let t=state.map[sy][sx];if(t===1||t===5)break;
+   if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H){npcBullet.hitDist=i;break}
+   let t=state.map[sy][sx];if(t===1||t===5){npcBullet.hitDist=i;break}
    let hit=state.zombies.find(z=>z.alive&&dist({x:z.fx,y:z.fy},{x:npc.fx+0.5+adx*i,y:npc.fy+0.5+ady*i})<0.9);
    if(hit){
+    npcBullet.hitDist=i;
     let dmg=Math.max(1,wep.dmg+npc.atk);
     hit.hp-=dmg;hit.hitSlowTimer=HIT_SLOW_DURATION;hit.alerted=true;
-    if(hit.hp<=0){hit.alive=false;zombieDrop(hit.x,hit.y);addXP(state.player,XP_PER_KILL)}
+    if(hit.hp<=0){hit.alive=false;zombieDrop(hit.x,hit.y);addXP(state.player,XP_PER_KILL);state.kills++}
     break;
    }
   }
  }
 }
 
-// Boss throws rock
 function bossThrowRock(boss,target){
- boss.throwCooldown=180; // 3 sec
+ boss.throwCooldown=180;
  let angle=Math.atan2(target.fy-boss.fy,target.fx-boss.fx);
- // Warning first
  let dirs=['N','NE','E','SE','S','SO','O','NO'];
  let di=Math.round(((angle+Math.PI)/(Math.PI*2))*8)%8;
- state.rockWarnings.push({
-  x:target.fx,y:target.fy,timer:60,angle,
-  fromDir:dirs[(di+4)%8]
- });
- // Rock spawns after warning
- state.rocks.push({
-  sx:boss.fx,sy:boss.fy,tx:target.fx,ty:target.fy,
-  timer:60,totalTime:60,active:false,
-  dmg:15+rand(0,10)
- });
+ state.rockWarnings.push({x:target.fx,y:target.fy,timer:60,angle,fromDir:dirs[(di+4)%8]});
+ state.rocks.push({sx:boss.fx,sy:boss.fy,tx:target.fx,ty:target.fy,timer:60,totalTime:60,active:false,dmg:15+rand(0,10)});
 }
 
 function startBaseAssault(){
@@ -700,7 +852,6 @@ function spawnAssaultWave(){
   let z=makeZombie(x,y);z.alerted=true;
   state.zombies.push(z);
  }
- // Spawn boss on last wave
  if(state.baseWavesLeft===1){
   let side=rand(0,3);
   let bx,by;
@@ -726,6 +877,8 @@ export function update(){
  if(p.swingTimer>0)p.swingTimer--;
  if(p.cooldown>0){p.cooldown--;p.isAttacking=true}
  else{if(p.isAttacking){p.postAttackSlow=POST_ATTACK_SLOW_DURATION}p.isAttacking=false}
+ // SMG heat decay
+ if(p.smgHeat>0)p.smgHeat=Math.max(0,p.smgHeat-SMG_HEAT_DECAY);
 
  let s=TILE*state.scale;
  let pwx=p.fx*s-state.cam.x,pwy=p.fy*s-state.cam.y;
@@ -750,7 +903,7 @@ export function update(){
  let wep=getWeaponDef(sel);
  if(wep&&wep.name==='smg'){
   if(state.mouseDown&&p.cooldown<=0){
-   if(p.ammo>0){shootAttack(p);p.ammo--;p.swingTimer=6}
+   if(p.ammo>0){shootAttack(p);p.ammo--;p.swingTimer=6;p.smgHeat=Math.min(1,p.smgHeat+SMG_HEAT_PER_SHOT)}
    else msg('Plus de munitions!');
   }
  }else{
@@ -759,7 +912,7 @@ export function update(){
    if(wep){
     if(wep.melee){meleeAttack(p);p.swingTimer=p.swingDuration}
     else{if(p.ammo>0){shootAttack(p);p.ammo--}else msg('Plus de munitions!')}
-   }else msg('Selectionnez une arme (1-4)');
+   }else msg('Selectionnez une arme (1-5)');
   }
  }
  if(!state.mouseDown)state.attackPressed=false;
@@ -770,7 +923,6 @@ export function update(){
    state.holdingE=true;state.holdETimer=0;
    let didInteract=false;
 
-   // Talk to NPC leader to start assault
    if(state.baseEvent&&!state.baseEventActive){
     let leader=state.npcs.find(n=>n.alive&&n.isLeader);
     if(leader&&dist({x:p.fx,y:p.fy},{x:leader.fx,y:leader.fy})<INTERACT_RANGE){
@@ -778,10 +930,9 @@ export function update(){
     }
    }
 
-   // Armored door
    if(!didInteract){
     let door=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&d.barricaded);
-    if(door){door.open=!door.open;state.map[door.y][door.x]=door.open?3:1;msg(door.open?'Porte blindee ouverte':'Porte blindee fermee');didInteract=true}
+    if(door){door.open=!door.open;msg(door.open?'Porte ouverte':'Porte fermee');didInteract=true}
    }
 
    if(!didInteract){
@@ -797,7 +948,7 @@ export function update(){
       didInteract=true;
      }else if(it.type==='ammo'){p.ammo+=20;msg('Munitions +20 (total:'+p.ammo+')');state.items.splice(idx,1);didInteract=true}
      else if(it.type==='bandage'){
-      if(p.hp<p.maxHp){let heal=Math.min(15,p.maxHp-p.hp);p.hp+=heal;msg('Bandage! +'+heal+' PV');state.items.splice(idx,1)}
+      if(p.hp<p.maxHp){let heal=Math.min(15,p.maxHp-p.hp);p.hp+=heal;msg('Bandage! +'+heal+' PV');addFloater(p.fx,p.fy,'+'+heal,'#4f4');state.items.splice(idx,1)}
       else msg('PV au max!');didInteract=true;
      }else if(it.type==='material'){
       if(addMaterial(p,1)){msg('Materiaux +1 (total:'+getMaterials(p)+')');state.items.splice(idx,1)}
@@ -808,7 +959,7 @@ export function update(){
 
    if(!didInteract){
     let udoor=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&!d.barricaded);
-    if(udoor&&getMaterials(p)>=3){removeMaterial(p,3);udoor.barricaded=true;udoor.building.secured=true;state.map[udoor.y][udoor.x]=1;msg('Porte blindee! (E pour ouvrir/fermer)')}
+    if(udoor&&getMaterials(p)>=3){removeMaterial(p,3);udoor.barricaded=true;udoor.open=false;udoor.building.secured=true;msg('Porte reparee! (E pour ouvrir/fermer)')}
     else if(udoor&&getMaterials(p)<3){msg('Il faut 3 materiaux ('+getMaterials(p)+'/3)')}
    }
 
@@ -837,15 +988,20 @@ export function update(){
  }else{if(state.holdingE){state.holdingE=false;state.holdETimer=0;state.draggingBarrel=null}}
 
  for(let i=state.bullets.length-1;i>=0;i--){state.bullets[i].life--;if(state.bullets[i].life<=0)state.bullets.splice(i,1)}
- if(state.explosions){for(let i=state.explosions.length-1;i>=0;i--){state.explosions[i].timer--;if(state.explosions[i].timer<=0)state.explosions.splice(i,1)}}
+ for(let i=state.explosions.length-1;i>=0;i--){state.explosions[i].timer--;if(state.explosions[i].timer<=0)state.explosions.splice(i,1)}
+
+ // Damage floaters
+ for(let i=state.dmgFloaters.length-1;i>=0;i--){
+  state.dmgFloaters[i].life--;state.dmgFloaters[i].y-=0.02;
+  if(state.dmgFloaters[i].life<=0)state.dmgFloaters.splice(i,1);
+ }
 
  let playerInside=isInBuilding(p.x,p.y);
  if(playerInside){let bld=getBuildingAt(p.x,p.y);if(bld)bld.searched=true}
 
  // Zombies
- // Find all targets (player + NPCs)
- let targets=[{fx:p.fx,fy:p.fy,isPlayer:true,hp:p.hp}];
- for(let n of state.npcs){if(n.alive)targets.push({fx:n.fx,fy:n.fy,isNPC:true,npc:n,hp:n.hp,isLeader:n.isLeader})}
+ let targets=[{x:p.fx,y:p.fy,fx:p.fx,fy:p.fy,isPlayer:true,hp:p.hp}];
+ for(let n of state.npcs){if(n.alive)targets.push({x:n.fx,y:n.fy,fx:n.fx,fy:n.fy,isNPC:true,npc:n,hp:n.hp,isLeader:n.isLeader})}
 
  for(let z of state.zombies){
   if(!z.alive)continue;
@@ -855,18 +1011,28 @@ export function update(){
   if(z.atkTimer>0){z.atkTimer--;z.isAttacking=true}
   else{if(z.isAttacking){z.postAttackSlow=POST_ATTACK_SLOW_DURATION}z.isAttacking=false}
 
-  // Find nearest target (prefer leader)
   let bestTarget=null,bestDist=Infinity;
   for(let t of targets){
    let d=dist({x:z.fx,y:z.fy},t);
-   let weight=t.isLeader?0.5:1; // Prefer leader
+   let weight=t.isLeader?0.5:1;
    if(d*weight<bestDist){bestTarget=t;bestDist=d*weight}
   }
 
   let actualDist=bestTarget?dist({x:z.fx,y:z.fy},bestTarget):Infinity;
   if(!z.alerted&&actualDist<=SIGHT_RADIUS){
-   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){
-    z.alerted=true;
+   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){z.alerted=true}
+  }
+  // Slow wandering for non-alerted zombies
+  if(!z.alerted){
+   if(z.wanderTimer!==undefined){
+    z.wanderTimer--;
+    if(z.wanderTimer<=0){z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(90,240)}
+    let wspd=0.008;
+    let wnx=z.fx+Math.cos(z.wanderAngle)*wspd,wny=z.fy+Math.sin(z.wanderAngle)*wspd;
+    if(canWalk(Math.floor(wnx+0.5),Math.floor(wny+0.5))){z.fx=wnx;z.fy=wny}
+    else{z.wanderAngle=Math.random()*Math.PI*2}
+    z.x=Math.floor(z.fx+0.5);z.y=Math.floor(z.fy+0.5);
+    z.angle=z.wanderAngle;
    }
   }
   if(z.alerted&&bestTarget&&actualDist<30){
@@ -885,28 +1051,32 @@ export function update(){
      if(bestTarget.isPlayer){
       dmg=Math.max(1,dmg-Math.floor(p.armor/2));
       p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;
-      msg('Zombie frappe! -'+dmg+' PV');
+      addFloater(p.fx,p.fy,'-'+dmg,'#f44');
       if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
      }else if(bestTarget.isNPC){
       bestTarget.npc.hp-=dmg;
+      addFloater(bestTarget.npc.fx,bestTarget.npc.fy,'-'+dmg,'#f44');
       if(bestTarget.npc.hp<=0){bestTarget.npc.alive=false;msg(bestTarget.npc.isLeader?'Le chef est mort!':'Un survivant est mort!')}
      }
     }
    }
   }
 
-  // Boss throws rocks
   if(z.isBoss&&z.alive){
    if(z.throwCooldown>0)z.throwCooldown--;
    if(z.throwCooldown<=0&&actualDist<20){
-    // Prefer targeting the leader, else player
     let rockTarget=state.npcs.find(n=>n.alive&&n.isLeader)||{fx:p.fx,fy:p.fy};
     bossThrowRock(z,rockTarget);
    }
   }
  }
 
- // Update rock warnings & rocks
+ // Cleanup dead zombies periodically
+ if(state.tick%ZOMBIE_CLEANUP_INTERVAL===0){
+  state.zombies=state.zombies.filter(z=>z.alive);
+ }
+
+ // Rock warnings & rocks
  for(let i=state.rockWarnings.length-1;i>=0;i--){
   state.rockWarnings[i].timer--;
   if(state.rockWarnings[i].timer<=0)state.rockWarnings.splice(i,1);
@@ -916,15 +1086,13 @@ export function update(){
   r.timer--;
   if(r.timer<=0&&!r.active){
    r.active=true;
-   // Rock lands - damage in area
    let hitRadius=2;
    let pd=dist({x:r.tx,y:r.ty},{x:p.fx,y:p.fy});
-   if(pd<hitRadius){let dmg=Math.max(1,r.dmg-Math.floor(p.armor/3));p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;msg('Touche par un rocher! -'+dmg+' PV');if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}}
+   if(pd<hitRadius){let dmg=Math.max(1,r.dmg-Math.floor(p.armor/3));p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;addFloater(p.fx,p.fy,'-'+dmg,'#f80');if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}}
    for(let n of state.npcs){
     if(!n.alive)continue;
     if(dist({x:r.tx,y:r.ty},{x:n.fx,y:n.fy})<hitRadius){n.hp-=r.dmg;if(n.hp<=0){n.alive=false;msg(n.isLeader?'Le chef est touche!':'Survivant touche!')}}
    }
-   state.explosions=state.explosions||[];
    state.explosions.push({x:r.tx,y:r.ty,timer:15});
    state.rocks.splice(i,1);
   }
@@ -946,12 +1114,10 @@ export function update(){
     else{spawnAssaultWave();msg('Derniere vague! BOSS!',3000)}
    }
   }
-  // Check assault complete
   if(state.baseWavesLeft<=0&&aliveZ===0&&!state.baseRewardGiven){
    state.baseRewardGiven=true;
    let survivors=state.npcs.filter(n=>n.alive).length;
    if(survivors>0){
-    // Reward
     let rewardWpn=Math.random()<0.5?'shotgun':'smg';
     let slot1=p.inventory.findIndex(i=>i===null);
     if(slot1>=0&&!p.inventory.find(i=>i&&i.name===rewardWpn)){
@@ -962,9 +1128,8 @@ export function update(){
    }else{
     msg('Tous les survivants sont morts... Base perdue.',4000);
    }
-   // Open escape
-   let ex,ey;
-   do{ex=rand(0,MAP_W-1);ey=rand(0,MAP_H-1)}while(state.map[ey][ex]!==0);
+   let ex,ey,tries=0;
+   do{ex=rand(0,MAP_W-1);ey=rand(0,MAP_H-1);tries++}while(state.map[ey][ex]!==0&&tries<200);
    state.escapeZone={x:ex,y:ey};state.map[ey][ex]=4;
    state.baseEventActive=false;
   }
@@ -996,30 +1161,29 @@ export function draw(){
    if((x*11+y*3)%7===0){ctx.fillStyle=COLORS.grassDetail;ctx.fillRect(x*s+s*0.6,y*s+s*0.2,s*0.06,s*0.15)}
   }
   else if(t===1){
-   // Determine wall orientation based on building
-   let bld=null;
-   for(let b of state.buildings){
-    if(x>=b.x&&x<b.x+b.w&&y>=b.y&&y<b.y+b.h){bld=b;break}
-   }
+   let bld=getBuildingOwner(x,y);
    let side=bld?getWallSide(bld,x,y):null;
-   // Exterior face highlight
-   ctx.fillStyle=COLORS.wall;ctx.fillRect(x*s,y*s,s,s);
+   ctx.fillStyle=COLORS.wallInner;ctx.fillRect(x*s,y*s,s,s);
    if(side==='top'){
-    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.3);
-    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s+s*0.95,s,s*0.05);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.4);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.06);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s+s*0.85,s,s*0.15);
    }else if(side==='bottom'){
-    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.05);
-    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s+s*0.7,s,s*0.3);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s+s*0.6,s,s*0.4);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s+s*0.94,s,s*0.06);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s,s*0.15);
    }else if(side==='left'){
-    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s*0.3,s);
-    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s+s*0.95,y*s,s*0.05,s);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.85,y*s,s*0.15,s);
    }else if(side==='right'){
-    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s*0.05,s);
-    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s+s*0.7,y*s,s*0.3,s);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s+s*0.6,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s+s*0.94,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s*0.15,s);
    }else{
+    ctx.fillStyle=COLORS.wall;ctx.fillRect(x*s,y*s,s,s);
     ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.3);
    }
-   // Brick
    ctx.fillStyle='rgba(0,0,0,0.06)';
    ctx.fillRect(x*s,y*s+s*0.5,s*0.5,s*0.02);
    ctx.fillRect(x*s+s*0.25,y*s+s*0.7,s*0.5,s*0.02);
@@ -1031,25 +1195,49 @@ export function draw(){
    ctx.strokeStyle='rgba(255,255,255,0.03)';ctx.lineWidth=1;ctx.strokeRect(x*s+1,y*s+1,s-2,s-2);
    continue;
   }else if(t===3){
-   let door=state.doors.find(d=>d.x===x&&d.y===y);
+   let door=doorAt(x,y);
+   let dBld=door?door.building:null;
+   let dSide=dBld?getWallSide(dBld,x,y):null;
+   let isHoriz=(dSide==='top'||dSide==='bottom');
    if(door&&door.barricaded&&!door.open){
     ctx.fillStyle=COLORS.doorArmored;ctx.fillRect(x*s,y*s,s,s);
-    ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s,s*0.3);
-    ctx.fillStyle='rgba(255,255,255,0.05)';
-    ctx.fillRect(x*s+s*0.2,y*s+s*0.3,s*0.6,s*0.05);
-    ctx.fillRect(x*s+s*0.2,y*s+s*0.6,s*0.6,s*0.05);
+    if(isHoriz){
+     ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s,s*0.15);ctx.fillRect(x*s,y*s+s*0.85,s,s*0.15);
+     ctx.fillStyle='rgba(255,255,255,0.07)';
+     ctx.fillRect(x*s+s*0.15,y*s+s*0.35,s*0.7,s*0.04);
+     ctx.fillRect(x*s+s*0.15,y*s+s*0.6,s*0.7,s*0.04);
+     ctx.fillStyle='#8a7a5a';ctx.fillRect(x*s+s*0.45,y*s+s*0.42,s*0.1,s*0.16);
+    }else{
+     ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s*0.15,s);ctx.fillRect(x*s+s*0.85,y*s,s*0.15,s);
+     ctx.fillStyle='rgba(255,255,255,0.07)';
+     ctx.fillRect(x*s+s*0.35,y*s+s*0.15,s*0.04,s*0.7);
+     ctx.fillRect(x*s+s*0.6,y*s+s*0.15,s*0.04,s*0.7);
+     ctx.fillStyle='#8a7a5a';ctx.fillRect(x*s+s*0.42,y*s+s*0.45,s*0.16,s*0.1);
+    }
    }else if(door&&door.barricaded&&door.open){
     ctx.fillStyle=COLORS.floor;ctx.fillRect(x*s,y*s,s,s);
-    ctx.fillStyle=COLORS.doorArmored;ctx.fillRect(x*s,y*s,s*0.25,s);
-    ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s*0.25,s*0.3);
+    if(isHoriz){
+     ctx.fillStyle=COLORS.doorArmored;ctx.fillRect(x*s,y*s,s*0.2,s);
+     ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s*0.2,s*0.15);
+    }else{
+     ctx.fillStyle=COLORS.doorArmored;ctx.fillRect(x*s,y*s,s,s*0.2);
+     ctx.fillStyle=COLORS.doorArmoredTop;ctx.fillRect(x*s,y*s,s*0.15,s*0.2);
+    }
    }else{
-    // Broken door (not reinforced)
-    ctx.fillStyle=COLORS.doorBroken;ctx.fillRect(x*s,y*s,s,s);
-    ctx.fillStyle='rgba(0,0,0,0.2)';ctx.fillRect(x*s+s*0.1,y*s+s*0.05,s*0.8,s*0.9);
-    // Cracks
-    ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=1;
-    ctx.beginPath();ctx.moveTo(x*s+s*0.3,y*s+s*0.1);ctx.lineTo(x*s+s*0.5,y*s+s*0.5);ctx.lineTo(x*s+s*0.4,y*s+s*0.9);ctx.stroke();
-    ctx.fillStyle='rgba(100,80,50,0.3)';ctx.fillRect(x*s+s*0.7,y*s+s*0.4,s*0.1,s*0.12);
+    ctx.fillStyle=COLORS.floor;ctx.fillRect(x*s,y*s,s,s);
+    if(isHoriz){
+     ctx.fillStyle=COLORS.doorBroken;ctx.fillRect(x*s+s*0.05,y*s+s*0.1,s*0.35,s*0.8);
+     ctx.fillStyle='rgba(0,0,0,0.15)';ctx.fillRect(x*s+s*0.05,y*s+s*0.1,s*0.35,s*0.8);
+     ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=1;
+     ctx.beginPath();ctx.moveTo(x*s+s*0.15,y*s+s*0.15);ctx.lineTo(x*s+s*0.25,y*s+s*0.5);ctx.lineTo(x*s+s*0.18,y*s+s*0.85);ctx.stroke();
+     ctx.fillStyle='#555';ctx.fillRect(x*s+s*0.02,y*s+s*0.2,s*0.06,s*0.08);ctx.fillRect(x*s+s*0.02,y*s+s*0.7,s*0.06,s*0.08);
+    }else{
+     ctx.fillStyle=COLORS.doorBroken;ctx.fillRect(x*s+s*0.1,y*s+s*0.05,s*0.8,s*0.35);
+     ctx.fillStyle='rgba(0,0,0,0.15)';ctx.fillRect(x*s+s*0.1,y*s+s*0.05,s*0.8,s*0.35);
+     ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=1;
+     ctx.beginPath();ctx.moveTo(x*s+s*0.15,y*s+s*0.15);ctx.lineTo(x*s+s*0.5,y*s+s*0.25);ctx.lineTo(x*s+s*0.85,y*s+s*0.18);ctx.stroke();
+     ctx.fillStyle='#555';ctx.fillRect(x*s+s*0.2,y*s+s*0.02,s*0.08,s*0.06);ctx.fillRect(x*s+s*0.7,y*s+s*0.02,s*0.08,s*0.06);
+    }
    }
    continue;
   }else if(t===5){
@@ -1087,10 +1275,32 @@ export function draw(){
   ctx.fillStyle='rgba(0,0,0,0.3)';ctx.beginPath();ctx.ellipse(ix,iy+s*0.3,s*0.2,s*0.08,0,0,Math.PI*2);ctx.fill();
   let bob=Math.sin(state.tick*0.06+it.x*3)*s*0.04;
   if(it.type==='weapon'){
-   let col=it.name==='gun'?'#556':it.name==='shotgun'?'#654':'#445';
-   ctx.fillStyle=col;ctx.fillRect(ix-s*0.22,iy-s*0.15+bob,s*0.44,s*0.3);
-   ctx.fillStyle='#fff';ctx.font='bold '+Math.floor(s*0.2)+'px sans-serif';ctx.textAlign='center';
-   ctx.fillText(it.name==='gun'?'P':it.name==='shotgun'?'FP':'SM',ix,iy+s*0.08+bob);
+   let u=s/32;
+   ctx.save();ctx.translate(ix,iy+bob);
+   if(it.name==='bat'){
+    ctx.rotate(-0.4);
+    ctx.fillStyle='#888';ctx.fillRect(-s*0.25,-u*1.5,s*0.4,u*3);
+    ctx.fillStyle='#aaa';ctx.fillRect(s*0.1,-u*2.5,s*0.15,u*5);
+    ctx.fillStyle='#666';ctx.fillRect(-s*0.25,-u*1,s*0.08,u*2);
+   }else if(it.name==='gun'){
+    ctx.rotate(-0.3);
+    ctx.fillStyle='#2a2a2a';ctx.fillRect(-s*0.18,-u*2,s*0.36,u*4);
+    ctx.fillStyle='#1a1a1a';ctx.fillRect(-s*0.12,u*1,s*0.12,u*4);
+    ctx.fillStyle='#333';ctx.fillRect(s*0.14,-u*1,u*3,u*2);
+   }else if(it.name==='shotgun'){
+    ctx.rotate(-0.3);
+    ctx.fillStyle='#3a2a1a';ctx.fillRect(-s*0.3,-u*2,s*0.5,u*4);
+    ctx.fillStyle='#2a2a2a';ctx.fillRect(s*0.15,-u*2.5,u*4,u*5);
+    ctx.fillStyle='#555';ctx.fillRect(s*0.15,-u*1,u*5,u*2);
+    ctx.fillStyle='#1a1a1a';ctx.fillRect(-s*0.15,u*1,s*0.1,u*3);
+   }else if(it.name==='smg'){
+    ctx.rotate(-0.3);
+    ctx.fillStyle='#222';ctx.fillRect(-s*0.2,-u*1.5,s*0.35,u*3);
+    ctx.fillStyle='#1a1a1a';ctx.fillRect(-s*0.12,u*1.5,u*4,u*3);
+    ctx.fillStyle='#333';ctx.fillRect(s*0.02,u*1.5,u*3,u*4);
+    ctx.fillStyle='#2a2a2a';ctx.fillRect(s*0.12,-u*1,u*3,u*2);
+   }
+   ctx.restore();
   }else{
    let col='#cc0',label='M';
    if(it.type==='ammo'){col='#b80';label='\u2022\u2022'}
@@ -1114,11 +1324,11 @@ export function draw(){
  }
 
  // Explosions
- if(state.explosions){for(let e of state.explosions){
+ for(let e of state.explosions){
   let ex=e.x*s+s/2,ey=e.y*s+s/2,progress=1-e.timer/20,radius=BARREL_EXPLOSION_RADIUS*s*progress;
   ctx.globalAlpha=0.6*(1-progress);ctx.fillStyle='#ff4400';ctx.beginPath();ctx.arc(ex,ey,radius,0,Math.PI*2);ctx.fill();
   ctx.fillStyle='#ffaa00';ctx.beginPath();ctx.arc(ex,ey,radius*0.4,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
- }}
+ }
 
  // Rock warnings
  for(let w of state.rockWarnings){
@@ -1135,17 +1345,14 @@ export function draw(){
  for(let n of state.npcs){
   if(!n.alive)continue;
   drawNPC(ctx,n.fx*s+s/2,n.fy*s+s/2,s,n.angle,n);
-  // HP bar
   let bw=s*0.7;
   ctx.fillStyle='#024';ctx.fillRect(n.fx*s+s*0.15,n.fy*s-s*0.22,bw,s*0.08);
   ctx.fillStyle='#0af';ctx.fillRect(n.fx*s+s*0.15,n.fy*s-s*0.22,bw*(n.hp/n.maxHp),s*0.08);
-  // Leader quest marker
   if(n.isLeader&&state.baseEvent&&!state.baseEventActive){
    ctx.fillStyle='#ff0';ctx.font='bold '+Math.floor(s*0.4)+'px sans-serif';ctx.textAlign='center';
    let bounce=Math.sin(state.tick*0.08)*s*0.1;
    ctx.fillText('!',n.fx*s+s/2,n.fy*s-s*0.4+bounce);
   }
-  // Label
   ctx.fillStyle=n.isLeader?'#fa0':'#0af';ctx.font='bold '+Math.floor(s*0.22)+'px sans-serif';ctx.textAlign='center';
   ctx.fillText(n.isLeader?'Chef':'PNJ',n.fx*s+s/2,n.fy*s-s*0.55);
  }
@@ -1154,7 +1361,7 @@ export function draw(){
  let sortedZ=state.zombies.filter(z=>z.alive).sort((a,b)=>a.fy-b.fy);
  for(let z of sortedZ){
   let atkAnim=z.atkTimer>0?(z.atkTimer/z.atkDuration):0;
-  drawZombie(ctx,z.fx*s+s/2,z.fy*s+s/2,s,z.angle,z.variant,atkAnim,z.isBoss);
+  drawZombie(ctx,z.fx*s+s/2,z.fy*s+s/2,s,z.angle,z.variant,atkAnim,z.isBoss,z.alerted);
   let bw=s*(z.isBoss?1:0.7);
   let ox=z.isBoss?s*-0.02:s*0.15;
   ctx.fillStyle='#200';ctx.fillRect(z.fx*s+ox,z.fy*s-s*(z.isBoss?0.4:0.22),bw,s*0.08);
@@ -1168,16 +1375,14 @@ export function draw(){
  for(let b of state.bullets){
   let bx=b.x*s+s/2,by=b.y*s+s/2;
   ctx.strokeStyle='rgba(255,230,100,'+(b.life/8)*0.9+')';ctx.lineWidth=2*state.scale;
-  ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.cos(b.angle)*b.maxDist*s,by+Math.sin(b.angle)*b.maxDist*s);ctx.stroke();
+  let drawDist=(b.hitDist||b.maxDist)*s;
+  ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.cos(b.angle)*drawDist,by+Math.sin(b.angle)*drawDist);ctx.stroke();
  }
 
  // Player
  let swProg=p.swingTimer>0?(1-p.swingTimer/p.swingDuration):0;
  drawPlayer(ctx,p.fx*s+s/2,p.fy*s+s/2,s,p.angle,swProg,p);
  if(p.hitSlowTimer>HIT_SLOW_DURATION-4){ctx.globalAlpha=0.3;ctx.fillStyle='#f00';ctx.fillRect(p.fx*s+s*0.05,p.fy*s+s*0.05,s*0.9,s*0.9);ctx.globalAlpha=1}
-
- ctx.fillStyle='#0af';ctx.font='bold '+Math.floor(s*0.26)+'px sans-serif';ctx.textAlign='center';
- ctx.fillText('Lv.'+p.level,p.fx*s+s/2,p.fy*s-s*0.5);
 
  // Weapon range + spread cone
  let selW=p.inventory[p.selectedSlot];
@@ -1192,22 +1397,49 @@ export function draw(){
    ctx.arc(pcx,pcy,range*s/2,p.angle-(wepDef.arc||Math.PI/2)/2,p.angle+(wepDef.arc||Math.PI/2)/2);
    ctx.closePath();ctx.fill();
   }else{
-   // Show spread cone that widens with distance
-   let farSpread=getSpreadAtDist(wepDef,p.precision,range);
-   // Draw cone
+   // Cursor distance in tiles, clamped to weapon range
+   let mxW=state.mouseX+cam.x,myW=state.mouseY+cam.y;
+   let mdx=mxW-pcx,mdy=myW-pcy;
+   let mDistPx=Math.hypot(mdx,mdy);
+   let maxPx=range*s;
+   let clampedDist=Math.min(mDistPx,maxPx);
+   let clampedTiles=clampedDist/s;
+
+   // Reticle position (clamped to max range)
+   let retAngle=Math.atan2(mdy,mdx);
+   let retX=pcx+Math.cos(retAngle)*clampedDist;
+   let retY=pcy+Math.sin(retAngle)*clampedDist;
+
+   // Spread circle radius grows with distance
+   let spreadAtCursor=getSpreadAtDist(wepDef,p.precision,clampedTiles);
+   if(wepDef.name==='smg')spreadAtCursor+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
+   let circleRadius=Math.max(s*0.15,spreadAtCursor*clampedDist);
+
+   // Spread cone from player to reticle
    ctx.fillStyle='rgba(255,80,80,0.04)';
    ctx.beginPath();ctx.moveTo(pcx,pcy);
-   ctx.lineTo(pcx+Math.cos(p.angle-farSpread)*range*s/2,pcy+Math.sin(p.angle-farSpread)*range*s/2);
-   ctx.arc(pcx,pcy,range*s/2,p.angle-farSpread,p.angle+farSpread);
+   ctx.lineTo(pcx+Math.cos(retAngle-spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle-spreadAtCursor)*clampedDist);
+   ctx.arc(pcx,pcy,clampedDist,retAngle-spreadAtCursor,retAngle+spreadAtCursor);
    ctx.closePath();ctx.fill();
-   // Cone edges
+
+   // Cone edge lines
    ctx.strokeStyle='rgba(255,80,80,0.1)';ctx.lineWidth=1;ctx.setLineDash([s*0.1,s*0.08]);
-   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(p.angle-farSpread)*range*s/2,pcy+Math.sin(p.angle-farSpread)*range*s/2);ctx.stroke();
-   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(p.angle+farSpread)*range*s/2,pcy+Math.sin(p.angle+farSpread)*range*s/2);ctx.stroke();
+   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(retAngle-spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle-spreadAtCursor)*clampedDist);ctx.stroke();
+   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(retAngle+spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle+spreadAtCursor)*clampedDist);ctx.stroke();
    ctx.setLineDash([]);
-   // Range circle
+
+   // Reticle circle at cursor (spread indicator)
+   ctx.strokeStyle='rgba(255,80,80,0.35)';ctx.lineWidth=1.5;
+   ctx.beginPath();ctx.arc(retX,retY,circleRadius,0,Math.PI*2);ctx.stroke();
+   // Small crosshair inside reticle
+   let ch=Math.max(3,circleRadius*0.3);
+   ctx.strokeStyle='rgba(255,80,80,0.5)';ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(retX-ch,retY);ctx.lineTo(retX+ch,retY);ctx.stroke();
+   ctx.beginPath();ctx.moveTo(retX,retY-ch);ctx.lineTo(retX,retY+ch);ctx.stroke();
+
+   // Max range ring (faint)
    ctx.strokeStyle='rgba(255,80,80,0.06)';ctx.lineWidth=1;ctx.setLineDash([s*0.1,s*0.1]);
-   ctx.beginPath();ctx.arc(pcx,pcy,range*s/2,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+   ctx.beginPath();ctx.arc(pcx,pcy,maxPx,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
   }
  }
 
@@ -1227,6 +1459,61 @@ export function draw(){
 
  if(state.draggingBarrel){ctx.strokeStyle='rgba(255,200,0,0.4)';ctx.lineWidth=2;let db=state.draggingBarrel;ctx.beginPath();ctx.arc(db.fx*s+s/2,db.fy*s+s/2,s*0.4,0,Math.PI*2);ctx.stroke()}
 
+ // Interaction prompt [E]
+ let interact=getNearestInteraction(p);
+ if(interact){
+  let label='[E]';
+  if(interact.type==='item'){
+   let it=interact.item;
+   if(it.type==='weapon')label='[E] '+(WEAPONS[it.name]?.label||it.name);
+   else if(it.type==='ammo')label='[E] Munitions';
+   else if(it.type==='bandage')label='[E] Bandage';
+   else if(it.type==='material')label='[E] Materiaux';
+  }else if(interact.type==='door')label='[E] '+interact.label;
+  else if(interact.type==='repair')label='[E] Reparer (3 mat.)';
+  else if(interact.type==='escape')label='[E] Fuir';
+  else if(interact.type==='leader')label='[E] Parler';
+  ctx.fillStyle='rgba(255,230,0,0.85)';ctx.font='bold '+Math.floor(s*0.3)+'px sans-serif';ctx.textAlign='center';
+  ctx.fillText(label,p.fx*s+s/2,p.fy*s+s*1.3);
+ }
+
+ // Escape zone arrow (when off-screen)
+ let ez=state.escapeZone;
+ if(ez.x>=0&&ez.y>=0){
+  let ezx=ez.x*s+s/2,ezy=ez.y*s+s/2;
+  let onScreen=ezx>cam.x&&ezx<cam.x+state.W&&ezy>cam.y&&ezy<cam.y+state.H;
+  if(!onScreen){
+   let pcx=p.fx*s+s/2,pcy=p.fy*s+s/2;
+   let ang=Math.atan2(ezy-pcy,ezx-pcx);
+   let arrowDist=s*4;
+   let ax=pcx+Math.cos(ang)*arrowDist,ay=pcy+Math.sin(ang)*arrowDist;
+   ctx.save();ctx.translate(ax,ay);ctx.rotate(ang);
+   ctx.globalAlpha=0.4+0.2*Math.sin(state.tick*0.06);
+   ctx.fillStyle='#0af';
+   ctx.beginPath();ctx.moveTo(s*0.4,0);ctx.lineTo(-s*0.2,-s*0.2);ctx.lineTo(-s*0.2,s*0.2);ctx.closePath();ctx.fill();
+   ctx.globalAlpha=1;ctx.restore();
+  }
+ }
+
+ // Floating damage numbers
+ for(let f of state.dmgFloaters){
+  let fx=f.x*s+s/2,fy=f.y*s+s/2;
+  let alpha=f.life/f.maxLife;
+  ctx.globalAlpha=alpha;ctx.fillStyle=f.color;
+  ctx.font='bold '+Math.floor(s*0.28)+'px sans-serif';ctx.textAlign='center';
+  ctx.fillText(f.text,fx,fy);
+  ctx.globalAlpha=1;
+ }
+
+ // SMG heat bar (near crosshair)
+ if(wepDef&&wepDef.name==='smg'&&p.smgHeat>0.05){
+  let pcx=p.fx*s+s/2,pcy=p.fy*s+s/2;
+  let bw=s*0.8;
+  ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(pcx-bw/2,pcy+s*0.8,bw,s*0.1);
+  let hcol=p.smgHeat>0.7?'#f44':p.smgHeat>0.4?'#fa0':'#ff0';
+  ctx.fillStyle=hcol;ctx.fillRect(pcx-bw/2,pcy+s*0.8,bw*p.smgHeat,s*0.1);
+ }
+
  ctx.restore();
 }
 
@@ -1241,7 +1528,7 @@ export function startGame(){
  initPlayer();
  state.player.x=Math.floor(MAP_W/2);state.player.y=Math.floor(MAP_H/2);
  state.player.fx=state.player.x;state.player.fy=state.player.y;
- state.gameOver=false;state.mapCount=0;state.explosions=[];
+ state.gameOver=false;state.mapCount=0;state.kills=0;state.explosions=[];state.dmgFloaters=[];
  genMap();spawnPlayerInBuilding();
  msg('Survivez! Zone bleue = sortie. E = interagir.',3000);
  if(state.firstGame)state.showControls=true;
@@ -1249,8 +1536,8 @@ export function startGame(){
 
 export function retryWithSamePlayer(){
  state.gameOver=false;
- state.player.hp=state.player.maxHp;state.player.hitSlowTimer=0;state.player.postAttackSlow=0;
- state.explosions=[];
+ state.player.hp=state.player.maxHp;state.player.hitSlowTimer=0;state.player.postAttackSlow=0;state.player.smgHeat=0;
+ state.explosions=[];state.dmgFloaters=[];
  genMap();spawnPlayerInBuilding();state.mapCount++;
  msg('Nouvelle zone... Map #'+(state.mapCount+1),3000);emitChange();
 }
@@ -1258,11 +1545,16 @@ export function retryWithSamePlayer(){
 function nextMap(){
  state.mapCount++;let p=state.player;
  p.hp=Math.min(p.maxHp,p.hp+Math.ceil(p.maxHp*0.3));
- p.hitSlowTimer=0;p.postAttackSlow=0;
+ p.hitSlowTimer=0;p.postAttackSlow=0;p.smgHeat=0;
  p.x=Math.floor(MAP_W/2);p.y=Math.floor(MAP_H/2);p.fx=p.x;p.fy=p.y;
- state.explosions=[];genMap();spawnPlayerInBuilding();
- msg('Zone '+(state.mapCount+1)+'...',3000);
+ state.explosions=[];state.dmgFloaters=[];genMap();spawnPlayerInBuilding();
+ msg('Zone '+(state.mapCount+1)+' | Nv.'+p.level+' | '+state.kills+' kills',3000);emitChange();
 }
 
-export function initCanvas(canvas){state.canvas=canvas;state.ctx=canvas.getContext('2d')}
-export function setSelectedSlot(i){state.player.selectedSlot=i}
+export function initCanvas(canvas){
+ state.canvas=canvas;state.ctx=canvas.getContext('2d');
+}
+
+export function setSelectedSlot(i){
+ if(i>=0&&i<INV_SIZE)state.player.selectedSlot=i;
+}

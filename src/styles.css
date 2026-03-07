@@ -69,14 +69,14 @@ canvas{display:block;cursor:crosshair}
  letter-spacing:1px;
 }
 
-/* Ammo badge */
-.ammo-badge{
- background:rgba(255,180,0,0.15);color:#fb0;
+/* Kill badge */
+.kill-badge{
+ background:rgba(255,60,60,0.15);color:#f66;
  padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700;
- border:1px solid rgba(255,180,0,0.25);
+ border:1px solid rgba(255,60,60,0.25);
  letter-spacing:1px;
 }
-.ammo-badge::before{content:'\2022 ';font-size:14px}
+.kill-badge::before{content:'\2620 ';font-size:13px}
 
 /* Stats bar */
 .stats-bar{
@@ -118,9 +118,25 @@ canvas{display:block;cursor:crosshair}
 @keyframes toast-in{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 
 /* Inventory */
-.inventory{
+.inventory-wrap{
  position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
- display:flex;gap:6px;pointer-events:none;z-index:3;
+ display:flex;flex-direction:column;align-items:center;gap:4px;
+ pointer-events:none;z-index:3;
+}
+.inv-weapon-name{
+ font-size:11px;font-weight:600;color:rgba(255,255,255,0.5);
+ letter-spacing:1px;text-transform:uppercase;
+}
+.inv-ammo-display{
+ font-size:12px;font-weight:700;color:#ffe066;
+ background:rgba(10,10,15,0.6);backdrop-filter:blur(6px);
+ padding:2px 10px;border-radius:8px;
+ border:1px solid rgba(255,230,0,0.15);
+ letter-spacing:0.5px;
+ text-shadow:0 0 6px rgba(255,230,0,0.3);
+}
+.inventory{
+ display:flex;gap:6px;
 }
 .inv-slot{
  width:58px;height:58px;border-radius:10px;position:relative;
@@ -207,7 +223,8 @@ canvas{display:block;cursor:crosshair}
  letter-spacing:8px;text-transform:uppercase;
  margin-bottom:8px;
 }
-.death-info{color:rgba(255,255,255,0.5);font-size:14px;margin-bottom:32px;letter-spacing:1px}
+.death-info{color:rgba(255,255,255,0.5);font-size:14px;margin-bottom:8px;letter-spacing:1px}
+.death-stats{color:rgba(255,255,255,0.3);font-size:12px;margin-bottom:32px;letter-spacing:1px;font-variant-numeric:tabular-nums}
 .death-btn{
  padding:14px 36px;margin:6px;font-size:14px;font-weight:600;
  cursor:pointer;border-radius:8px;letter-spacing:0.5px;

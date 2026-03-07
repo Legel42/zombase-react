@@ -26,8 +26,8 @@ function LevelBadge({ level }) {
   return <span className="level-badge">Nv.{level}</span>
 }
 
-function AmmoBadge({ ammo }) {
-  return <span className="ammo-badge">{ammo}</span>
+function KillBadge({ kills }) {
+  return <span className="kill-badge">{kills}</span>
 }
 
 function StatsBar({ player, mapCount }) {
@@ -63,24 +63,35 @@ function MatIcon() {
   return <svg viewBox="0 0 28 28"><rect x="6" y="6" width="16" height="16" rx="2" fill="#cc0" opacity="0.8"/></svg>
 }
 
+const WEAPON_LABELS = { bat: 'Batte', gun: 'Pistolet', shotgun: 'Fusil', smg: 'SMG' }
+
 function Inventory({ player }) {
+  const sel = player.inventory[player.selectedSlot]
+  const isRanged = sel && sel.type === 'weapon' && sel.name !== 'bat'
+  const selLabel = sel ? (sel.type === 'weapon' ? WEAPON_LABELS[sel.name] : sel.type === 'material' ? 'Materiaux' : '') : ''
   return (
-    <div className="inventory">
-      {player.inventory.map((item, i) => (
-        <div key={i} className={`inv-slot${i === player.selectedSlot ? ' selected' : ''}`}>
-          <span className="slot-num">{i + 1}</span>
-          {item && (
-            <div className="inv-icon">
-              {item.name === 'bat' && <BatIcon />}
-              {item.name === 'gun' && <GunIcon />}
-              {item.name === 'shotgun' && <ShotgunIcon />}
-              {item.name === 'smg' && <SmgIcon />}
-              {item.type === 'material' && <MatIcon />}
-            </div>
-          )}
-          {item?.type === 'material' && <span className="inv-qty">{item.qty}</span>}
-        </div>
-      ))}
+    <div className="inventory-wrap">
+      {selLabel && <div className="inv-weapon-name">{selLabel}</div>}
+      {isRanged && (
+        <div className="inv-ammo-display">{player.ammo} balles</div>
+      )}
+      <div className="inventory">
+        {player.inventory.map((item, i) => (
+          <div key={i} className={`inv-slot${i === player.selectedSlot ? ' selected' : ''}`}>
+            <span className="slot-num">{i + 1}</span>
+            {item && (
+              <div className="inv-icon">
+                {item.name === 'bat' && <BatIcon />}
+                {item.name === 'gun' && <GunIcon />}
+                {item.name === 'shotgun' && <ShotgunIcon />}
+                {item.name === 'smg' && <SmgIcon />}
+                {item.type === 'material' && <MatIcon />}
+              </div>
+            )}
+            {item?.type === 'material' && <span className="inv-qty">{item.qty}</span>}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -95,16 +106,16 @@ function ControlsOverlay() {
         <span className="cg-key">Clic gauche</span><span className="cg-desc">Attaquer</span>
         <span className="cg-key">E</span><span className="cg-desc">Interagir / Ramasser</span>
         <span className="cg-key">E (maintenir)</span><span className="cg-desc">Deplacer un baril</span>
-        <span className="cg-key">E sur porte</span><span className="cg-desc">Barricader (3 mat.) / Ouvrir porte blindee</span>
-        <span className="cg-key">1 - 4</span><span className="cg-desc">Changer de slot</span>
+        <span className="cg-key">E sur porte</span><span className="cg-desc">Reparer (3 mat.) / Ouvrir-fermer</span>
+        <span className="cg-key">1 - 5</span><span className="cg-desc">Changer de slot</span>
         <span className="cg-key">TAB</span><span className="cg-desc">Stats / Controles</span>
       </div>
-      <div className="controls-footer">Munitions universelles &bull; Armes rares sur zombies (5%)</div>
+      <div className="controls-footer">Munitions universelles &bull; Armes rares sur zombies (5%) &bull; Difficulte progressive</div>
     </div>
   )
 }
 
-function StatsOverlay({ player, zombies, mapCount }) {
+function StatsOverlay({ player, zombies, mapCount, kills }) {
   const spread = ((6 - player.precision) * 0.05 * 180 / Math.PI).toFixed(1)
   const alive = zombies.filter(z => z.alive).length
   return (
@@ -113,6 +124,7 @@ function StatsOverlay({ player, zombies, mapCount }) {
       <div className="stats-grid">
         <span className="sg-label">PV</span><span className="sg-val">{player.hp}/{player.maxHp}</span>
         <span className="sg-label">Niveau</span><span className="sg-val">{player.level} ({player.xp}/100 XP)</span>
+        <span className="sg-label">Kills</span><span className="sg-val">{kills}</span>
         <span className="sg-label">Munitions</span><span className="sg-val">{player.ammo}</span>
         <span className="sg-label">Attaque</span><span className="sg-val">{player.atk}</span>
         <span className="sg-label">Armure</span><span className="sg-val">{player.armor}</span>
@@ -125,16 +137,17 @@ function StatsOverlay({ player, zombies, mapCount }) {
         <span className="sg-label">Mitraillette</span><span className="sg-val">{WEAPON_DEFS.smg.dmg} dmg (auto)</span>
         <span className="sg-label">Zombie</span><span className="sg-val">{BASE_DMG_ZOMBIE} dmg</span>
       </div>
-      <div className="stats-footer">E = interagir &bull; Zone bleue = fuir &bull; Porte blindee: E pour ouvrir/fermer</div>
+      <div className="stats-footer">E = interagir &bull; Zone bleue = fuir &bull; Porte reparee: E pour ouvrir/fermer</div>
     </div>
   )
 }
 
-function DeathScreen({ player, mapCount, onRetry, onNew }) {
+function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
   return (
     <div className="death-overlay">
       <div className="death-title">Mort</div>
-      <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; PV:{player.maxHp} ATK:{player.atk} ARM:{player.armor}</div>
+      <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; {kills} kills</div>
+      <div className="death-stats">PV:{player.maxHp} ATK:{player.atk} ARM:{player.armor} PRE:{player.precision} VIT:{player.speed}</div>
       <button className="death-btn retry" onClick={onRetry}>Recommencer (meme perso)</button>
       <button className="death-btn newgame" onClick={onNew}>Nouveau personnage</button>
     </div>
@@ -190,7 +203,7 @@ export default function App() {
     const onKey = (e, val) => {
       state.keys[e.code] = val
       if (e.code === 'Tab') e.preventDefault()
-      if (val && e.code >= 'Digit1' && e.code <= 'Digit4') setSelectedSlot(parseInt(e.code[5]) - 1)
+      if (val && e.code >= 'Digit1' && e.code <= 'Digit5') setSelectedSlot(parseInt(e.code[5]) - 1)
     }
     const onKD = e => onKey(e, true)
     const onKU = e => onKey(e, false)
@@ -238,7 +251,7 @@ export default function App() {
           <LevelBadge level={p.level} />
           <HpBar hp={p.hp} maxHp={p.maxHp} />
           <XpBar player={p} />
-          <AmmoBadge ammo={p.ammo} />
+          <KillBadge kills={state.kills} />
         </div>
         <StatsBar player={p} mapCount={state.mapCount} />
         <SlowIndicator player={p} />
@@ -258,12 +271,12 @@ export default function App() {
 
       <Inventory player={p} />
 
-      {!isTouch && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; E: interagir &bull; Maintenir E: deplacer baril &bull; TAB: stats/touches</div>}
+      {!isTouch && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; E: interagir &bull; TAB: stats</div>}
       {isTouch && <TouchControls />}
 
       {(state.showStats || state.showControls) && <ControlsOverlay />}
-      {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapCount} />}
-      {state.gameOver && <DeathScreen player={p} mapCount={state.mapCount} onRetry={handleRetry} onNew={handleNew} />}
+      {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapCount} kills={state.kills} />}
+      {state.gameOver && <DeathScreen player={p} mapCount={state.mapCount} kills={state.kills} onRetry={handleRetry} onNew={handleNew} />}
     </div>
   )
 }
