@@ -19,15 +19,26 @@ export const WEAPON_DEFS=WEAPONS;
 const ZOMBIE_ATK_RANGE=1.2;
 const HIT_SLOW_DURATION=20;
 const POST_ATTACK_SLOW_DURATION=60;
-const INTERACT_RANGE=2.0;
+const INTERACT_RANGE=1.4;
 const BARREL_EXPLOSION_RADIUS=3,BARREL_EXPLOSION_DMG=40,MAX_BARRELS=3;
-const XP_PER_KILL=5,XP_BOSS_MULT=5;
+const XP_PER_KILL=5,XP_BOSS_MULT=10;
 const XP_PER_LEVEL=100;
 const DIST_SPREAD_FACTOR=0.008;
 const ZOMBIE_CLEANUP_INTERVAL=120;
 const SMG_HEAT_PER_SHOT=0.08,SMG_HEAT_DECAY=0.02,SMG_HEAT_SPREAD_MULT=3;
 const GUNSHOT_SPAWN_COOLDOWN=90*60; // 90 seconds in ticks (60fps)
 const GUNSHOT_SPAWN_COUNT={gun:1,smg:2,shotgun:3};
+const ZOMBIE_GROANS=['Grrr...','Braaains...','Rrrhh...','Graaaah...','Hnnngg...','Uuugh...','Raaah...','Mmrgh...'];
+const NPC_DIALOGUES=[
+ 'On va tous mourir!','Miam, il reste un cafard dans mon assiette',
+ 'J\'ai mal aux pieds...','C\'est quoi cette odeur?',
+ 'Mon ex etait pire que ces zombies','Quelqu\'un a du cafe?',
+ 'Je regrette de pas avoir pris ma retraite','Avant c\'etait mieux...',
+ 'Y\'a du wifi ici?','J\'aurais du rester au lit',
+ 'Si je survis, j\'ecris un livre','C\'est bientot fini?',
+ 'J\'ai faim...','Qui a mange mon dernier biscuit?!',
+ 'Les zombies puent!','Je prefere les vampires...',
+];
 
 const rand=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
@@ -39,7 +50,7 @@ export const state={
  keys:{},mouseX:0,mouseY:0,mouseDown:false,
  gameOver:false,showStats:false,
  map:[],buildings:[],doors:[],items:[],zombies:[],bullets:[],barrels:[],cityWalls:[],
- npcs:[],rockWarnings:[],rocks:[],explosions:[],dmgFloaters:[],
+ npcs:[],rocks:[],explosions:[],dmgFloaters:[],confetti:[],
  doorMap:new Map(),buildingGrid:null,
  escapeZone:{x:0,y:0},
  player:null,mapCount:0,tick:0,attackPressed:false,kills:0,lastGunSpawnTick:-99999,
@@ -76,6 +87,18 @@ function rebuildSpatialMaps(){
 function doorAt(x,y){return state.doorMap.get(tileKey(x,y))||null}
 function isInBuilding(tx,ty){return tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H&&!!state.buildingGrid[tileKey(tx,ty)]}
 function getBuildingAt(tx,ty){return(tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H)?state.buildingGrid[tileKey(tx,ty)]:null}
+function isBuildingOccupied(bld){
+ if(!bld)return false;
+ let p=state.player;
+ if(getBuildingAt(Math.floor(p.fx+0.5),Math.floor(p.fy+0.5))===bld)return true;
+ for(let n of state.npcs){if(n.alive&&getBuildingAt(Math.floor(n.fx+0.5),Math.floor(n.fy+0.5))===bld)return true}
+ return false;
+}
+function zombieCanEnter(tx,ty){
+ let bld=getBuildingAt(tx,ty);
+ if(bld&&!isBuildingOccupied(bld))return false;
+ return true;
+}
 function getBuildingOwner(x,y){
  for(let b of state.buildings){if(x>=b.x&&x<b.x+b.w&&y>=b.y&&y<b.y+b.h)return b}
  return null;
@@ -261,11 +284,11 @@ function drawZombie(ctx,cx,cy,s,angle,variant,atkAnim,isBoss,isMoving){
 
 // -- Player --
 function initPlayer(){
- let pvStat=rand(1,5);
+ let pvStat=5+rand(0,2);
  state.player={
   x:Math.floor(MAP_W/2),y:Math.floor(MAP_H/2),
   hp:BASE_HP_PLAYER+pvStat*5,maxHp:BASE_HP_PLAYER+pvStat*5,
-  pvStat,atk:rand(1,5),armor:rand(1,5),precision:rand(1,5),speed:rand(1,5),
+  pvStat,atk:5+rand(0,2),armor:5+rand(0,2),precision:5+rand(0,2),speed:5+rand(0,2),
   inventory:[{type:'weapon',name:'bat',ammo:0},null,null,null,null],
   selectedSlot:0,cooldown:0,angle:0,
   fx:Math.floor(MAP_W/2),fy:Math.floor(MAP_H/2),
@@ -292,24 +315,16 @@ function addXP(p,amount){
  while(p.xp>=XP_PER_LEVEL){p.xp-=XP_PER_LEVEL;p.level++;levelUp(p)}
 }
 function levelUp(p){
- let totalPoints=rand(1,3);
  let stats=['pvStat','atk','armor','precision','speed'];
- if(totalPoints===1){
-  let s=stats[rand(0,stats.length-1)];applyStat(p,s,1);
-  msg('Level '+p.level+'! +1 '+statName(s));
- }else{
-  let first=rand(0,stats.length-1),second;
-  do{second=rand(0,stats.length-1)}while(second===first);
-  let distribution=new Array(stats.length).fill(0);
-  distribution[first]++;distribution[second]++;
-  let remaining=totalPoints-2;
-  while(remaining>0){distribution[[first,second][rand(0,1)]]++;remaining--}
-  let parts=[];
-  for(let i=0;i<stats.length;i++){
-   if(distribution[i]>0){applyStat(p,stats[i],distribution[i]);parts.push('+'+distribution[i]+' '+statName(stats[i]))}
-  }
-  msg('Level '+p.level+'! '+parts.join(', '),3000);
+ // +5 HP guaranteed
+ p.maxHp+=5;p.hp=Math.min(p.hp+5,p.maxHp);
+ let parts=['+5 PV'];
+ // 0-3 random boost to each stat
+ for(let s of stats){
+  let boost=rand(0,3);
+  if(boost>0){applyStat(p,s,boost);parts.push('+'+boost+' '+statName(s))}
  }
+ msg('Level '+p.level+'! '+parts.join(', '),3000);
 }
 function applyStat(p,stat,amount){
  p[stat]+=amount;
@@ -331,7 +346,7 @@ function makeZombie(x,y,level){
   cooldown:0,atkCooldown:Math.max(30,60-lv*3),atkTimer:0,atkDuration:15,
   alive:true,alerted:false,variant:rand(0,1),
   angle:Math.random()*Math.PI*2,hitSlowTimer:0,isAttacking:false,
-  postAttackSlow:0,isBoss:false};
+  postAttackSlow:0,isBoss:false,speech:null,speechTimer:0,alertDelay:0,jumpAnim:0};
 }
 
 function makeBossZombie(x,y){
@@ -346,20 +361,20 @@ function makeBossZombie(x,y){
 }
 
 function makeNPC(x,y,weapon,isLeader){
- let hp=isLeader?80:40;
+ let hp=isLeader?105:60;
  return{x,y,fx:x,fy:y,hp,maxHp:hp,
   atk:isLeader?5:2,armor:isLeader?5:2,precision:isLeader?6:3,speed:isLeader?3:2,
   weapon,isLeader,alive:true,angle:0,_moving:false,
   cooldown:0,atkCooldown:weapon==='bat'?30:25,
-  level:isLeader?3:1,questActive:false};
+  level:isLeader?3:1,questActive:false,speech:null,speechTimer:0};
 }
 
 function genMap(){
  state.map=Array.from({length:MAP_H},()=>Array(MAP_W).fill(0));
  state.buildings=[];state.doors=[];state.items=[];state.zombies=[];
  state.bullets=[];state.barrels=[];state.cityWalls=[];
- state.npcs=[];state.rockWarnings=[];state.rocks=[];state.explosions=[];state.dmgFloaters=[];
- state.baseBoss=null;state.baseEventActive=false;state.baseRewardGiven=false;
+ state.npcs=[];state.rocks=[];state.explosions=[];state.dmgFloaters=[];state.confetti=[];
+ state.baseBoss=null;state.baseEventActive=false;state.baseRewardGiven=false;state.hordeSpawned=0;
  let{map,buildings,doors,items,zombies,player}=state;
 
  let isBaseLevel=(state.mapCount+1)%5===0&&state.mapCount>0;
@@ -398,7 +413,7 @@ function genMap(){
 
  while(buildings.length<targetBuildings&&attempts<400){
   attempts++;
-  let w=rand(4,8),h=rand(4,7),bx=rand(1,MAP_W-w-1),by=rand(1,MAP_H-h-1);
+  let w=rand(5,9),h=rand(6,8),bx=rand(1,MAP_W-w-1),by=rand(1,MAP_H-h-1);
   let ok=true;
   for(let b of buildings){if(bx<b.x+b.w+2&&bx+w+2>b.x&&by<b.y+b.h+2&&by+h+2>b.y){ok=false;break}}
   if(!ok)continue;
@@ -411,8 +426,16 @@ function genMap(){
   else if(doorSide===2)doorPos={x:bx,y:rand(by+1,by+h-2)};
   else doorPos={x:bx+w-1,y:rand(by+1,by+h-2)};
   map[doorPos.y][doorPos.x]=3;
-  buildings.push({x:bx,y:by,w,h,secured:false,searched:false});
-  doors.push({x:doorPos.x,y:doorPos.y,barricaded:false,open:false,building:buildings[buildings.length-1]});
+  let bld={x:bx,y:by,w,h,secured:false,searched:false};
+  buildings.push(bld);
+  doors.push({x:doorPos.x,y:doorPos.y,barricaded:false,open:false,building:bld});
+  // Add a window on a different side
+  let winSide=(doorSide+rand(1,3))%4,winPos;
+  if(winSide===0)winPos={x:rand(bx+1,bx+w-2),y:by};
+  else if(winSide===1)winPos={x:rand(bx+1,bx+w-2),y:by+h-1};
+  else if(winSide===2)winPos={x:bx,y:rand(by+1,by+h-2)};
+  else winPos={x:bx+w-1,y:rand(by+1,by+h-2)};
+  if(map[winPos.y][winPos.x]===1){map[winPos.y][winPos.x]=6}
  }
 
  for(let i=0;i<rand(8,16);i++){
@@ -439,15 +462,23 @@ function genMap(){
 
  // Items
  let gunCount=0;
+ let usedPos=new Set();
+ function itemPos(x,y){return y*MAP_W+x}
+ function placeItem(item){if(!usedPos.has(itemPos(item.x,item.y))){usedPos.add(itemPos(item.x,item.y));items.push(item);return true}return false}
  for(let bi=0;bi<buildings.length;bi++){
   let b=buildings[bi];
   let ix=rand(b.x+1,b.x+b.w-2),iy=rand(b.y+1,b.y+b.h-2);
   if(gunCount<2&&(bi<2||Math.random()<0.3)){
-   items.push({x:ix,y:iy,type:'weapon',name:'gun'});gunCount++;
+   placeItem({x:ix,y:iy,type:'weapon',name:'gun'});gunCount++;
+  }
+  // 5% chance of shotgun or smg per building
+  if(Math.random()<0.05){
+   let sx=rand(b.x+1,b.x+b.w-2),sy=rand(b.y+1,b.y+b.h-2);
+   placeItem({x:sx,y:sy,type:'weapon',name:Math.random()<0.5?'shotgun':'smg'});
   }
   let lx=rand(b.x+1,b.x+b.w-2),ly=rand(b.y+1,b.y+b.h-2);
-  if(lx===ix&&ly===iy)lx=clamp(lx+1,b.x+1,b.x+b.w-2);
-  items.push({x:lx,y:ly,type:Math.random()<0.5?'ammo':'bandage'});
+  if(usedPos.has(itemPos(lx,ly))){lx=clamp(lx+1,b.x+1,b.x+b.w-2)}
+  placeItem({x:lx,y:ly,type:Math.random()<0.5?'ammo':'bandage'});
  }
  for(let i=0;i<rand(10,20);i++){
   let x,y,tries=0;
@@ -478,13 +509,13 @@ function genMap(){
     zombies.push(z);spawned++;
    }
   }
-  // 50% solo near/in buildings
+  // 50% solo near/in buildings (not the player's spawn building)
   let soloCount=zombieCount-spawned;
+  let spawnBuildings=buildings.filter((b,i)=>i>0);
   for(let i=0;i<soloCount;i++){
    let x,y,tries=0;
-   if(buildings.length>0){
-    let b=buildings[rand(0,buildings.length-1)];
-    // Try spawning inside or just outside the building
+   if(spawnBuildings.length>0){
+    let b=spawnBuildings[rand(0,spawnBuildings.length-1)];
     do{
      if(Math.random()<0.4){
       x=rand(b.x+1,b.x+b.w-2);y=rand(b.y+1,b.y+b.h-2);
@@ -538,6 +569,20 @@ function genMap(){
     state.npcs.push(npc);
    }
   }
+  // Zombies on map borders
+  let borderZ=rand(8,14);
+  for(let i=0;i<borderZ;i++){
+   let side=rand(0,3),x,y;
+   if(side===0){x=rand(0,MAP_W-1);y=rand(0,2)}
+   else if(side===1){x=rand(0,MAP_W-1);y=rand(MAP_H-3,MAP_H-1)}
+   else if(side===2){x=rand(0,2);y=rand(0,MAP_H-1)}
+   else{x=rand(MAP_W-3,MAP_W-1);y=rand(0,MAP_H-1)}
+   if(map[y][x]===0){
+    let z=makeZombie(x,y);
+    z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(60,180);
+    zombies.push(z);
+   }
+  }
   for(let i=0;i<rand(1,2);i++){
    let x,y,tries=0;
    do{x=rand(1,MAP_W-2);y=rand(1,MAP_H-2);tries++}while((map[y][x]!==0)&&tries<50);
@@ -562,7 +607,7 @@ function alertZombiesNear(px,py,radius){
   if(dist({x:px,y:py},{x:z.fx,y:z.fy})>radius)continue;
   if(isWallBetween(px,py,z.fx,z.fy))continue;
   if(playerInside&&!isInBuilding(z.x,z.y))continue;
-  z.alerted=true;
+  z.alerted=true;z.alertDelay=60;z.jumpAnim=20;
  }
 }
 function gunShotSpawnZombies(weaponName){
@@ -586,7 +631,7 @@ function gunShotSpawnZombies(weaponName){
 }
 function getSpeedMult(entity){
  let m=1;
- if(entity.isAttacking)m*=0.75;
+ if(entity.isAttacking)m*=0.05;
  if(entity.hitSlowTimer>0)m*=0.5;
  if(entity.postAttackSlow>0)m*=0.6;
  return m;
@@ -599,7 +644,7 @@ function zombieDrop(x,y){
 function canWalk(tx,ty){
  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;
  let t=state.map[ty][tx];
- if(t===1||t===5)return false;
+ if(t===1||t===5||t===6)return false;
  if(t===3){let door=doorAt(tx,ty);if(door&&door.barricaded&&!door.open)return false}
  return true;
 }
@@ -617,7 +662,7 @@ function explodeBarrel(barrel){
    let d=dist({x:bx,y:by},{x:z.fx,y:z.fy});
    if(d<BARREL_EXPLOSION_RADIUS){
     let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-d/BARREL_EXPLOSION_RADIUS)));
-    z.hp-=dmg;z.alerted=true;z.hitSlowTimer=HIT_SLOW_DURATION;
+    z.hp-=dmg;z.alerted=true;z.alertDelay=0;z.hitSlowTimer=HIT_SLOW_DURATION;
     addFloater(z.fx,z.fy,'-'+dmg,'#f80');
     if(z.hp<=0){z.alive=false;zombieDrop(z.x,z.y);addXP(state.player,XP_PER_KILL);state.kills++}
    }
@@ -651,14 +696,14 @@ function meleeAttack(p){
  for(let z of state.zombies){
   if(!z.alive)continue;
   let d=dist({x:p.fx,y:p.fy},{x:z.fx,y:z.fy});
-  if(d<range){
+  if(d<range&&!isWallBetween(p.fx,p.fy,z.fx,z.fy)){
    let toZ=Math.atan2(z.fy-p.fy,z.fx-p.fx);
    let diff=Math.abs(toZ-p.angle);if(diff>Math.PI)diff=2*Math.PI-diff;
    if(diff<arc/2){
     let hitChance=wep.melee?0.99:(p.precision+3)/10;
     if(Math.random()<hitChance){
      let dmg=Math.max(1,wep.dmg+p.atk+3-Math.floor(z.armor/3));
-     z.hp-=dmg;z.alerted=true;z.hitSlowTimer=HIT_SLOW_DURATION;
+     z.hp-=dmg;z.alerted=true;z.alertDelay=0;z.hitSlowTimer=HIT_SLOW_DURATION;
      addFloater(z.fx,z.fy,'-'+dmg,'#fc0');
      if(z.hp<=0){
       z.alive=false;zombieDrop(z.x,z.y);state.kills++;
@@ -690,7 +735,7 @@ function shootOneBullet(p,wep,shotAngle){
   let rd=i*range/steps;
   let sx=Math.floor(p.fx+0.5+adx*rd),sy=Math.floor(p.fy+0.5+ady*rd);
   if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H){bullet.hitDist=rd;break}
-  let t=state.map[sy][sx];if(t===1||t===5){bullet.hitDist=rd;break}
+  let t=state.map[sy][sx];if(t===1||t===5||t===6){bullet.hitDist=rd;break}
   if(t===3){let door=doorAt(sx,sy);if(door&&door.barricaded&&!door.open){bullet.hitDist=rd;break}}
   let px2=p.fx+0.5+adx*rd,py2=p.fy+0.5+ady*rd;
   let hitBarrel=state.barrels.find(b=>b.alive&&dist({x:b.fx,y:b.fy},{x:px2,y:py2})<0.8);
@@ -750,25 +795,29 @@ function findNearestInteractable(p){
 
 // What can the player interact with right now? (for prompt display)
 function getNearestInteraction(p){
+ let candidates=[];
  // Leader
- if(state.baseEvent&&!state.baseEventActive){
+ if(state.baseEvent&&!state.baseEventActive&&!state.baseRewardGiven){
   let leader=state.npcs.find(n=>n.alive&&n.isLeader);
-  if(leader&&dist({x:p.fx,y:p.fy},{x:leader.fx,y:leader.fy})<INTERACT_RANGE)return{type:'leader'};
+  if(leader){let d=dist({x:p.fx,y:p.fy},{x:leader.fx,y:leader.fy});if(d<INTERACT_RANGE)candidates.push({type:'leader',dist:d})}
  }
  // Barricaded door
- let rdoor=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&d.barricaded);
- if(rdoor)return{type:'door',label:rdoor.open?'Fermer':'Ouvrir'};
+ for(let door of state.doors){
+  let d=dist({x:door.x+0.5,y:door.y+0.5},{x:p.fx,y:p.fy});
+  if(d<INTERACT_RANGE&&door.barricaded)candidates.push({type:'door',label:door.open?'Fermer':'Ouvrir',dist:d});
+  else if(d<INTERACT_RANGE&&!door.barricaded)candidates.push({type:'repair',mats:getMaterials(p),dist:d});
+ }
  // Item
  let item=findNearestInteractable(p);
- if(item)return{type:'item',item:item.item};
- // Unbarricaded door
- let udoor=state.doors.find(d=>dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<INTERACT_RANGE&&!d.barricaded);
- if(udoor)return{type:'repair',mats:getMaterials(p)};
+ if(item)candidates.push({type:'item',item:item.item,dist:dist({x:p.fx,y:p.fy},{x:item.item.x+0.5,y:item.item.y+0.5})});
  // Escape
  if(!state.baseEvent||!state.baseEventActive){
-  if(dist({x:p.fx,y:p.fy},{x:state.escapeZone.x+0.5,y:state.escapeZone.y+0.5})<INTERACT_RANGE)return{type:'escape'};
+  let d=dist({x:p.fx,y:p.fy},{x:state.escapeZone.x+0.5,y:state.escapeZone.y+0.5});
+  if(d<INTERACT_RANGE)candidates.push({type:'escape',dist:d});
  }
- return null;
+ if(candidates.length===0)return null;
+ candidates.sort((a,b)=>a.dist-b.dist);
+ return candidates[0];
 }
 
 // NPC AI
@@ -790,13 +839,37 @@ function updateNPC(npc){
   let spd=0.02+npc.speed*0.005;
   let adx=nearestZ.fx-npc.fx,ady=nearestZ.fy-npc.fy,len=Math.hypot(adx,ady)||1;
   let nx=npc.fx+adx/len*spd,ny=npc.fy+ady/len*spd;
-  if(canWalk(Math.floor(nx+0.5),Math.floor(npc.fy+0.5)))npc.fx=nx;
-  if(canWalk(Math.floor(npc.fx+0.5),Math.floor(ny+0.5)))npc.fy=ny;
+  let nCanX=canWalk(Math.floor(nx+0.5),Math.floor(npc.fy+0.5));
+  let nCanY=canWalk(Math.floor(npc.fx+0.5),Math.floor(ny+0.5));
+  if(nCanX)npc.fx=nx;
+  if(nCanY)npc.fy=ny;
+  // Wall avoidance for NPCs
+  if(!nCanX&&!nCanY){
+   let px1=npc.fx+ady/len*spd,py1=npc.fy+adx/len*spd;
+   let px2=npc.fx-ady/len*spd,py2=npc.fy-adx/len*spd;
+   if(canWalk(Math.floor(px1+0.5),Math.floor(py1+0.5))){npc.fx=px1;npc.fy=py1}
+   else if(canWalk(Math.floor(px2+0.5),Math.floor(py2+0.5))){npc.fx=px2;npc.fy=py2}
+  }else if(!nCanX){
+   if(canWalk(Math.floor(nx+0.5),Math.floor((npc.fy-spd)+0.5)))npc.fy-=spd;
+   else if(canWalk(Math.floor(nx+0.5),Math.floor((npc.fy+spd)+0.5)))npc.fy+=spd;
+  }else if(!nCanY){
+   if(canWalk(Math.floor((npc.fx-spd)+0.5),Math.floor(ny+0.5)))npc.fx-=spd;
+   else if(canWalk(Math.floor((npc.fx+spd)+0.5),Math.floor(ny+0.5)))npc.fx+=spd;
+  }
   npc.x=Math.floor(npc.fx+0.5);npc.y=Math.floor(npc.fy+0.5);
  }else{npc._moving=false}
 
  if(npc.cooldown>0){npc.cooldown--;return}
- if(wep&&wep.melee&&nd<wep.range){
+ // Melee fallback when zombie is very close
+ if(nd<1.5&&!isWallBetween(npc.fx,npc.fy,nearestZ.fx,nearestZ.fy)){
+  npc.cooldown=20;
+  if(Math.random()*10<npc.precision+2){
+   let dmg=Math.max(1,3+npc.atk);
+   nearestZ.hp-=dmg;nearestZ.alerted=true;nearestZ.hitSlowTimer=HIT_SLOW_DURATION;
+   addFloater(nearestZ.fx,nearestZ.fy,'-'+dmg,'#0af');
+   if(nearestZ.hp<=0){nearestZ.alive=false;zombieDrop(nearestZ.x,nearestZ.y);addXP(state.player,XP_PER_KILL);state.kills++}
+  }
+ }else if(wep&&wep.melee&&nd<wep.range){
   npc.cooldown=wep.cooldown;
   if(Math.random()*10<npc.precision+2){
    let dmg=Math.max(1,wep.dmg+npc.atk);
@@ -811,7 +884,7 @@ function updateNPC(npc){
   for(let i=1;i<wep.range;i++){
    let sx=Math.floor(npc.fx+0.5+adx*i),sy=Math.floor(npc.fy+0.5+ady*i);
    if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H){npcBullet.hitDist=i;break}
-   let t=state.map[sy][sx];if(t===1||t===5){npcBullet.hitDist=i;break}
+   let t=state.map[sy][sx];if(t===1||t===5||t===6){npcBullet.hitDist=i;break}
    let hit=state.zombies.find(z=>z.alive&&dist({x:z.fx,y:z.fy},{x:npc.fx+0.5+adx*i,y:npc.fy+0.5+ady*i})<0.9);
    if(hit){
     npcBullet.hitDist=i;
@@ -827,21 +900,25 @@ function updateNPC(npc){
 function bossThrowRock(boss,target){
  boss.throwCooldown=180;
  let angle=Math.atan2(target.fy-boss.fy,target.fx-boss.fx);
- let dirs=['N','NE','E','SE','S','SO','O','NO'];
- let di=Math.round(((angle+Math.PI)/(Math.PI*2))*8)%8;
- state.rockWarnings.push({x:target.fx,y:target.fy,timer:60,angle,fromDir:dirs[(di+4)%8]});
- state.rocks.push({sx:boss.fx,sy:boss.fy,tx:target.fx,ty:target.fy,timer:60,totalTime:60,active:false,dmg:15+rand(0,10)});
+ let spd=0.25;
+ state.rocks.push({fx:boss.fx,fy:boss.fy,angle,spd,dmg:15+rand(0,10),life:80,active:true});
 }
 
+const HORDE_TOTAL=50,HORDE_WAVES=4;
 function startBaseAssault(){
  state.baseEventActive=true;
- state.baseWavesLeft=3;
+ state.baseWavesLeft=HORDE_WAVES;
  state.baseWaveTimer=0;
+ state.hordeSpawned=0;
  msg('ALERTE! Les zombies attaquent la base!',3000);
+ spawnAssaultWave();
 }
 
 function spawnAssaultWave(){
- let count=rand(6,10)+state.player.level;
+ let remaining=HORDE_TOTAL-state.hordeSpawned;
+ let isLastWave=state.baseWavesLeft<=1;
+ let count=isLastWave?remaining:Math.ceil(remaining/state.baseWavesLeft)+rand(-2,2);
+ count=Math.max(5,Math.min(count,remaining));
  for(let i=0;i<count;i++){
   let side=rand(0,3);
   let x,y;
@@ -852,7 +929,8 @@ function spawnAssaultWave(){
   let z=makeZombie(x,y);z.alerted=true;
   state.zombies.push(z);
  }
- if(state.baseWavesLeft===1){
+ state.hordeSpawned+=count;
+ if(isLastWave){
   let side=rand(0,3);
   let bx,by;
   if(side===0){bx=rand(5,MAP_W-5);by=0}
@@ -890,7 +968,8 @@ export function update(){
  if(keys.ArrowLeft||keys.KeyA||keys.KeyQ)dx=-1;
  if(keys.ArrowRight||keys.KeyD)dx=1;
  if(dx||dy){
-  let spd=(0.06+p.speed*0.015)*getSpeedMult(p);
+  let rawSpd=Math.min(p.speed,20);
+  let spd=(0.05+rawSpd*0.01)*getSpeedMult(p);
   let nx=p.fx+dx*spd,ny=p.fy+dy*spd;
   if(canWalk(Math.floor(nx+(dx>0?0.4:-0.4)+0.5),Math.floor(p.fy+0.5)))p.fx=nx;
   if(canWalk(Math.floor(p.fx+0.5),Math.floor(ny+(dy>0?0.4:-0.4)+0.5)))p.fy=ny;
@@ -941,7 +1020,7 @@ export function update(){
      let it=found.item,idx=found.index;
      if(it.type==='weapon'){
       let existing=p.inventory.find(i=>i&&i.type==='weapon'&&i.name===it.name);
-      if(existing){msg('Deja possede!')}
+      if(existing){p.ammo+=10;msg('Munitions +10 (total:'+p.ammo+')');state.items.splice(idx,1)}
       else{let slot=p.inventory.findIndex(i=>i===null);
        if(slot>=0){p.inventory[slot]={type:'weapon',name:it.name,ammo:0};msg((WEAPONS[it.name]?.label||it.name)+'! (slot '+(slot+1)+')');state.items.splice(idx,1)}
        else msg('Inventaire plein!')}
@@ -995,9 +1074,14 @@ export function update(){
   state.dmgFloaters[i].life--;state.dmgFloaters[i].y-=0.02;
   if(state.dmgFloaters[i].life<=0)state.dmgFloaters.splice(i,1);
  }
+ // Confetti
+ for(let i=state.confetti.length-1;i>=0;i--){
+  let c=state.confetti[i];c.x+=c.vx;c.y+=c.vy;c.vy+=0.002;c.life--;
+  if(c.life<=0)state.confetti.splice(i,1);
+ }
 
  let playerInside=isInBuilding(p.x,p.y);
- if(playerInside){let bld=getBuildingAt(p.x,p.y);if(bld)bld.searched=true}
+ if(playerInside){let bld=getBuildingAt(p.x,p.y);if(bld&&!bld.searched){bld.searched=true;addXP(p,5);addFloater(p.fx,p.fy,'+5 XP','#0f0')}}
 
  // Zombies
  let targets=[{x:p.fx,y:p.fy,fx:p.fx,fy:p.fy,isPlayer:true,hp:p.hp}];
@@ -1008,6 +1092,7 @@ export function update(){
   if(z.cooldown>0)z.cooldown--;
   if(z.hitSlowTimer>0)z.hitSlowTimer--;
   if(z.postAttackSlow>0)z.postAttackSlow--;
+  if(z.speechTimer>0)z.speechTimer--;else{z.speech=null;if(Math.random()<0.001){z.speech=ZOMBIE_GROANS[rand(0,ZOMBIE_GROANS.length-1)];z.speechTimer=90}}
   if(z.atkTimer>0){z.atkTimer--;z.isAttacking=true}
   else{if(z.isAttacking){z.postAttackSlow=POST_ATTACK_SLOW_DURATION}z.isAttacking=false}
 
@@ -1020,8 +1105,9 @@ export function update(){
 
   let actualDist=bestTarget?dist({x:z.fx,y:z.fy},bestTarget):Infinity;
   if(!z.alerted&&actualDist<=SIGHT_RADIUS){
-   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){z.alerted=true}
+   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){z.alerted=true;z.alertDelay=60;z.jumpAnim=20}
   }
+  if(z.alertDelay>0){z.alertDelay--;z.jumpAnim=Math.max(0,z.jumpAnim-1)}
   // Slow wandering for non-alerted zombies
   if(!z.alerted){
    if(z.wanderTimer!==undefined){
@@ -1029,22 +1115,66 @@ export function update(){
     if(z.wanderTimer<=0){z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(90,240)}
     let wspd=0.008;
     let wnx=z.fx+Math.cos(z.wanderAngle)*wspd,wny=z.fy+Math.sin(z.wanderAngle)*wspd;
-    if(canWalk(Math.floor(wnx+0.5),Math.floor(wny+0.5))){z.fx=wnx;z.fy=wny}
-    else{z.wanderAngle=Math.random()*Math.PI*2}
+    let wCanW=canWalk(Math.floor(wnx+0.5),Math.floor(wny+0.5))&&zombieCanEnter(Math.floor(wnx+0.5),Math.floor(wny+0.5));
+    if(wCanW){z.fx=wnx;z.fy=wny}
+    else{
+     // Try sliding along the wall before giving up
+     let slideA=z.wanderAngle+Math.PI/2,slideB=z.wanderAngle-Math.PI/2;
+     let sa=z.fx+Math.cos(slideA)*wspd,sb=z.fy+Math.sin(slideA)*wspd;
+     let sCanA=canWalk(Math.floor(sa+0.5),Math.floor(sb+0.5))&&zombieCanEnter(Math.floor(sa+0.5),Math.floor(sb+0.5));
+     if(sCanA){z.fx=sa;z.fy=sb;z.wanderAngle=slideA}
+     else{let sc=z.fx+Math.cos(slideB)*wspd,sd=z.fy+Math.sin(slideB)*wspd;
+      let sCanB=canWalk(Math.floor(sc+0.5),Math.floor(sd+0.5))&&zombieCanEnter(Math.floor(sc+0.5),Math.floor(sd+0.5));
+      if(sCanB){z.fx=sc;z.fy=sd;z.wanderAngle=slideB}
+      else{z.wanderAngle=Math.random()*Math.PI*2}
+     }
+    }
     z.x=Math.floor(z.fx+0.5);z.y=Math.floor(z.fy+0.5);
     z.angle=z.wanderAngle;
    }
   }
-  if(z.alerted&&bestTarget&&actualDist<30){
+  if(z.alerted&&z.alertDelay<=0&&bestTarget&&actualDist<30){
    z.angle=Math.atan2(bestTarget.fy-z.fy,bestTarget.fx-z.fx);
    let zspd=(0.02+z.speed*0.008)*getSpeedMult(z);
    let adx=bestTarget.fx-z.fx,ady=bestTarget.fy-z.fy,len=Math.hypot(adx,ady)||1;
    let nx=z.fx+adx/len*zspd,ny=z.fy+ady/len*zspd;
-   if(canWalk(Math.floor(nx+0.5),Math.floor(z.fy+0.5)))z.fx=nx;
-   if(canWalk(Math.floor(z.fx+0.5),Math.floor(ny+0.5)))z.fy=ny;
+   let canX=canWalk(Math.floor(nx+0.5),Math.floor(z.fy+0.5))&&zombieCanEnter(Math.floor(nx+0.5),Math.floor(z.fy+0.5));
+   let canY=canWalk(Math.floor(z.fx+0.5),Math.floor(ny+0.5))&&zombieCanEnter(Math.floor(z.fx+0.5),Math.floor(ny+0.5));
+   if(canX)z.fx=nx;
+   if(canY)z.fy=ny;
+   // Wall avoidance: slide perpendicular when blocked
+   if(!canX&&!canY){
+    let perpX=z.fx+ady/len*zspd,perpX2=z.fx-ady/len*zspd;
+    let perpY=z.fy+adx/len*zspd,perpY2=z.fy-adx/len*zspd;
+    if(canWalk(Math.floor(perpX+0.5),Math.floor(perpY+0.5))){z.fx=perpX;z.fy=perpY}
+    else if(canWalk(Math.floor(perpX2+0.5),Math.floor(perpY2+0.5))){z.fx=perpX2;z.fy=perpY2}
+   }else if(!canX){
+    let slideUp=z.fy-zspd,slideDown=z.fy+zspd;
+    if(canWalk(Math.floor(nx+0.5),Math.floor(slideUp+0.5)))z.fy=slideUp;
+    else if(canWalk(Math.floor(nx+0.5),Math.floor(slideDown+0.5)))z.fy=slideDown;
+   }else if(!canY){
+    let slideLeft=z.fx-zspd,slideRight=z.fx+zspd;
+    if(canWalk(Math.floor(slideLeft+0.5),Math.floor(ny+0.5)))z.fx=slideLeft;
+    else if(canWalk(Math.floor(slideRight+0.5),Math.floor(ny+0.5)))z.fx=slideRight;
+   }
+   // Zombie attacks barricaded doors when blocked
+   if(!canX||!canY){
+    let checkX=Math.floor(nx+0.5),checkY=Math.floor(ny+0.5);
+    let blockedDoor=null;
+    if(!canX){blockedDoor=doorAt(checkX,Math.floor(z.fy+0.5))}
+    if(!blockedDoor&&!canY){blockedDoor=doorAt(Math.floor(z.fx+0.5),checkY)}
+    if(blockedDoor&&blockedDoor.barricaded&&!blockedDoor.open&&z.cooldown<=0){
+     z.cooldown=z.atkCooldown;z.atkTimer=z.atkDuration;
+     if(blockedDoor.doorHp!==undefined){
+      blockedDoor.doorHp--;
+      addFloater(blockedDoor.x,blockedDoor.y,'-1','#a60');
+      if(blockedDoor.doorHp<=0){blockedDoor.barricaded=false;blockedDoor.open=true;msg('Une porte a ete defoncee!')}
+     }else{blockedDoor.barricaded=false;blockedDoor.open=true}
+    }
+   }
    z.x=Math.floor(z.fx+0.5);z.y=Math.floor(z.fy+0.5);
 
-   if(actualDist<ZOMBIE_ATK_RANGE&&z.cooldown<=0){
+   if(actualDist<ZOMBIE_ATK_RANGE&&z.cooldown<=0&&!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){
     z.cooldown=z.atkCooldown;z.atkTimer=z.atkDuration;
     if(Math.random()*10<z.precision){
      let dmg=Math.max(1,BASE_DMG_ZOMBIE+Math.floor(z.atk/3));
@@ -1077,30 +1207,68 @@ export function update(){
  }
 
  // Rock warnings & rocks
- for(let i=state.rockWarnings.length-1;i>=0;i--){
-  state.rockWarnings[i].timer--;
-  if(state.rockWarnings[i].timer<=0)state.rockWarnings.splice(i,1);
- }
+ // Rock projectiles (slingshot style)
  for(let i=state.rocks.length-1;i>=0;i--){
   let r=state.rocks[i];
-  r.timer--;
-  if(r.timer<=0&&!r.active){
-   r.active=true;
-   let hitRadius=2;
-   let pd=dist({x:r.tx,y:r.ty},{x:p.fx,y:p.fy});
-   if(pd<hitRadius){let dmg=Math.max(1,r.dmg-Math.floor(p.armor/3));p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;addFloater(p.fx,p.fy,'-'+dmg,'#f80');if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}}
-   for(let n of state.npcs){
-    if(!n.alive)continue;
-    if(dist({x:r.tx,y:r.ty},{x:n.fx,y:n.fy})<hitRadius){n.hp-=r.dmg;if(n.hp<=0){n.alive=false;msg(n.isLeader?'Le chef est touche!':'Survivant touche!')}}
+  r.life--;
+  if(r.life<=0){state.rocks.splice(i,1);continue}
+  let nx=r.fx+Math.cos(r.angle)*r.spd,ny=r.fy+Math.sin(r.angle)*r.spd;
+  let tx=Math.floor(nx+0.5),ty=Math.floor(ny+0.5);
+  // Stop at walls/obstacles
+  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H||state.map[ty][tx]===1||state.map[ty][tx]===5){
+   state.explosions.push({x:r.fx,y:r.fy,timer:10});state.rocks.splice(i,1);continue;
+  }
+  let blockedDoor=doorAt(tx,ty);
+  if(blockedDoor&&blockedDoor.barricaded&&!blockedDoor.open){
+   if(blockedDoor.doorHp!==undefined){blockedDoor.doorHp--;if(blockedDoor.doorHp<=0){blockedDoor.barricaded=false;blockedDoor.open=true;msg('Une porte a ete defoncee!')}}
+   state.explosions.push({x:r.fx,y:r.fy,timer:10});state.rocks.splice(i,1);continue;
+  }
+  r.fx=nx;r.fy=ny;
+  // Hit player
+  if(dist({x:r.fx,y:r.fy},{x:p.fx,y:p.fy})<0.8){
+   let dmg=Math.max(1,r.dmg-Math.floor(p.armor/3));p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;
+   addFloater(p.fx,p.fy,'-'+dmg,'#f80');
+   if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
+   state.explosions.push({x:r.fx,y:r.fy,timer:10});state.rocks.splice(i,1);continue;
+  }
+  // Hit NPCs
+  for(let n of state.npcs){
+   if(!n.alive)continue;
+   if(dist({x:r.fx,y:r.fy},{x:n.fx,y:n.fy})<0.8){
+    n.hp-=r.dmg;if(n.hp<=0){n.alive=false;msg(n.isLeader?'Le chef est touche!':'Survivant touche!')}
+    addFloater(n.fx,n.fy,'-'+r.dmg,'#f80');
+    state.explosions.push({x:r.fx,y:r.fy,timer:10});state.rocks.splice(i,1);break;
    }
-   state.explosions.push({x:r.tx,y:r.ty,timer:15});
-   state.rocks.splice(i,1);
   }
  }
 
- // NPCs
- if(state.baseEventActive){
-  for(let n of state.npcs){updateNPC(n)}
+ // NPCs - always active on base levels
+ if(state.baseEvent){
+  for(let n of state.npcs){
+   if(!n.alive)continue;
+   if(n.speechTimer>0)n.speechTimer--;else{n.speech=null;if(Math.random()<0.0008){n.speech=NPC_DIALOGUES[rand(0,NPC_DIALOGUES.length-1)];n.speechTimer=150}}
+   // Patrol wandering for outside NPCs (before event starts)
+   if(!state.baseEventActive&&n.patrolGroup!==undefined){
+    let nearestZ=null,nd=Infinity;
+    for(let z of state.zombies){if(!z.alive)continue;let d=dist({x:n.fx,y:n.fy},{x:z.fx,y:z.fy});if(d<SIGHT_RADIUS&&d<nd){nearestZ=z;nd=d}}
+    if(nearestZ){updateNPC(n)}
+    else{
+     n.wanderTimer--;
+     if(n.wanderTimer<=0){n.wanderAngle=Math.random()*Math.PI*2;n.wanderTimer=rand(90,200)}
+     let wspd=0.012;
+     let wnx=n.fx+Math.cos(n.wanderAngle)*wspd,wny=n.fy+Math.sin(n.wanderAngle)*wspd;
+     // Stay near HQ
+     let dToCenter=Math.hypot(wnx-n.patrolCenterX,wny-n.patrolCenterY);
+     if(dToCenter>10){n.wanderAngle=Math.atan2(n.patrolCenterY-n.fy,n.patrolCenterX-n.fx)+((Math.random()-0.5)*1)}
+     if(canWalk(Math.floor(wnx+0.5),Math.floor(wny+0.5))){n.fx=wnx;n.fy=wny;n._moving=true}
+     else{n.wanderAngle=Math.random()*Math.PI*2;n._moving=false}
+     n.x=Math.floor(n.fx+0.5);n.y=Math.floor(n.fy+0.5);
+     n.angle=n.wanderAngle;
+    }
+   }else{
+    updateNPC(n);
+   }
+  }
  }
 
  // Base defense wave logic
@@ -1110,21 +1278,64 @@ export function update(){
    state.baseWaveTimer++;
    if(state.baseWaveTimer>120){
     state.baseWavesLeft--;state.baseWaveTimer=0;
-    if(state.baseWavesLeft>0){spawnAssaultWave();msg('Vague '+(3-state.baseWavesLeft)+'/3!',2000)}
-    else{spawnAssaultWave();msg('Derniere vague! BOSS!',3000)}
+    if(state.baseWavesLeft>0){
+     spawnAssaultWave();
+     let waveNum=HORDE_WAVES-state.baseWavesLeft;
+     msg('Vague '+waveNum+'/'+HORDE_WAVES+'! ('+state.hordeSpawned+'/'+HORDE_TOTAL+')',2000);
+    }else{
+     spawnAssaultWave();msg('Derniere vague! BOSS!',3000);
+    }
    }
   }
-  if(state.baseWavesLeft<=0&&aliveZ===0&&!state.baseRewardGiven){
+  // Boss dead = combat over, kill remaining zombies
+  if(state.baseBoss&&!state.baseBoss.alive&&!state.baseRewardGiven){
+   for(let z of state.zombies){if(z.alive&&!z.isBoss){z.alive=false;state.kills++}}
+   state.baseWavesLeft=0;
+  }
+  if(state.baseWavesLeft<=0&&(aliveZ===0||(state.baseBoss&&!state.baseBoss.alive))&&!state.baseRewardGiven){
    state.baseRewardGiven=true;
    let survivors=state.npcs.filter(n=>n.alive).length;
+   // Confetti burst
+   for(let i=0;i<80;i++){
+    state.confetti.push({x:p.fx,y:p.fy,vx:(Math.random()-0.5)*0.15,vy:-Math.random()*0.12-0.03,
+     color:['#f44','#4f4','#44f','#ff0','#f0f','#0ff','#fa0'][rand(0,6)],life:120+rand(0,60)});
+   }
+   // NPC celebration
+   for(let n of state.npcs){if(n.alive){n.speech='Victoire!!';n.speechTimer=180}}
    if(survivors>0){
     let rewardWpn=Math.random()<0.5?'shotgun':'smg';
-    let slot1=p.inventory.findIndex(i=>i===null);
-    if(slot1>=0&&!p.inventory.find(i=>i&&i.name===rewardWpn)){
-     p.inventory[slot1]={type:'weapon',name:rewardWpn,ammo:0};
+    // Drop reward items near player
+    let rx=Math.floor(p.fx+0.5),ry=Math.floor(p.fy+0.5);
+    let dropped=false;
+    for(let dr=1;dr<=3&&!dropped;dr++){
+     for(let ddx=-dr;ddx<=dr&&!dropped;ddx++){
+      for(let ddy=-dr;ddy<=dr&&!dropped;ddy++){
+       let tx=rx+ddx,ty=ry+ddy;
+       if(tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H&&(state.map[ty][tx]===0||state.map[ty][tx]===2)){
+        if(!state.items.find(it=>it.x===tx&&it.y===ty)){
+         state.items.push({x:tx,y:ty,type:'weapon',name:rewardWpn,ammo:0});
+         dropped=true;
+        }
+       }
+      }
+     }
     }
-    p.ammo+=40;
-    msg('Base sauvee! '+survivors+' survivant(s)! '+(WEAPONS[rewardWpn]?.label)+' + 40 munitions!',4000);
+    // Also drop ammo nearby
+    let ammoDrop=false;
+    for(let dr=1;dr<=3&&!ammoDrop;dr++){
+     for(let ddx=-dr;ddx<=dr&&!ammoDrop;ddx++){
+      for(let ddy=-dr;ddy<=dr&&!ammoDrop;ddy++){
+       let tx=rx+ddx,ty=ry+ddy;
+       if(tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H&&(state.map[ty][tx]===0||state.map[ty][tx]===2)){
+        if(!state.items.find(it=>it.x===tx&&it.y===ty)){
+         state.items.push({x:tx,y:ty,type:'ammo',amount:40});
+         ammoDrop=true;
+        }
+       }
+      }
+     }
+    }
+    msg('Base sauvee! '+survivors+' survivant(s)! Recompense au sol!',4000);
    }else{
     msg('Tous les survivants sont morts... Base perdue.',4000);
    }
@@ -1247,6 +1458,24 @@ export function draw(){
    ctx.strokeStyle='rgba(255,255,255,0.06)';ctx.lineWidth=1;
    ctx.beginPath();ctx.moveTo(x*s,y*s+s*0.5);ctx.lineTo(x*s+s,y*s+s*0.5);ctx.stroke();
    continue;
+  }else if(t===6){
+   // Window tile: wall with glass pane
+   let wBld=getBuildingAt(x,y);
+   let wSide=wBld?getWallSide(wBld,x,y):null;
+   let isH=(wSide==='top'||wSide==='bottom');
+   ctx.fillStyle=COLORS.wall;ctx.fillRect(x*s,y*s,s,s);
+   ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.25);
+   // Glass pane
+   if(isH){
+    ctx.fillStyle='rgba(100,160,220,0.25)';ctx.fillRect(x*s+s*0.15,y*s+s*0.25,s*0.7,s*0.5);
+    ctx.strokeStyle='rgba(150,200,255,0.3)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.15,y*s+s*0.25,s*0.7,s*0.5);
+    ctx.strokeStyle='rgba(150,200,255,0.15)';ctx.beginPath();ctx.moveTo(x*s+s*0.5,y*s+s*0.25);ctx.lineTo(x*s+s*0.5,y*s+s*0.75);ctx.stroke();
+   }else{
+    ctx.fillStyle='rgba(100,160,220,0.25)';ctx.fillRect(x*s+s*0.25,y*s+s*0.15,s*0.5,s*0.7);
+    ctx.strokeStyle='rgba(150,200,255,0.3)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.25,y*s+s*0.15,s*0.5,s*0.7);
+    ctx.strokeStyle='rgba(150,200,255,0.15)';ctx.beginPath();ctx.moveTo(x*s+s*0.25,y*s+s*0.5);ctx.lineTo(x*s+s*0.75,y*s+s*0.5);ctx.stroke();
+   }
+   continue;
   }else{
    ctx.fillStyle='#0a1a2a';ctx.fillRect(x*s,y*s,s,s);
    ctx.globalAlpha=0.3+0.2*Math.sin(state.tick*0.08);
@@ -1311,6 +1540,57 @@ export function draw(){
   }
  }
 
+ // Vision cones through doors and windows
+ let playerBld=getBuildingAt(p.x,p.y);
+ if(!playerBld){
+  let viewTiles=[];
+  for(let d of state.doors){if(dist({x:d.x+0.5,y:d.y+0.5},{x:p.fx,y:p.fy})<3)viewTiles.push(d)}
+  // Find nearby windows (tile type 6)
+  for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){
+   let wx=p.x+dx,wy=p.y+dy;
+   if(wx>=0&&wy>=0&&wx<MAP_W&&wy<MAP_H&&state.map[wy][wx]===6){
+    if(dist({x:wx+0.5,y:wy+0.5},{x:p.fx,y:p.fy})<3)viewTiles.push({x:wx,y:wy})
+   }
+  }
+  for(let vt of viewTiles){
+   let vtBld=getBuildingOwner(vt.x,vt.y);if(!vtBld)continue;
+   let side=getWallSide(vtBld,vt.x,vt.y);if(!side)continue;
+   let inAngle;
+   if(side==='top')inAngle=Math.PI/2;
+   else if(side==='bottom')inAngle=-Math.PI/2;
+   else if(side==='left')inAngle=0;
+   else inAngle=Math.PI;
+   let cx=(vt.x+0.5)*s,cy=(vt.y+0.5)*s;
+   let coneLen=Math.min(vtBld.w,vtBld.h)*s*0.6;
+   let coneArc=Math.PI/3;
+   ctx.fillStyle='rgba(255,255,200,0.06)';
+   ctx.beginPath();ctx.moveTo(cx,cy);
+   ctx.arc(cx,cy,coneLen,inAngle-coneArc/2,inAngle+coneArc/2);
+   ctx.closePath();ctx.fill();
+   // Show zombies inside cone
+   for(let z of state.zombies){
+    if(!z.alive)continue;
+    let zb=getBuildingAt(z.x,z.y);if(zb!==vtBld)continue;
+    let toZ=Math.atan2(z.fy-vt.y-0.5,z.fx-vt.x-0.5);
+    let diff=Math.abs(toZ-inAngle);if(diff>Math.PI)diff=2*Math.PI-diff;
+    if(diff<coneArc/2&&dist({x:vt.x+0.5,y:vt.y+0.5},{x:z.fx,y:z.fy})<coneLen/s){
+     let zx=z.fx*s+s/2,zy=z.fy*s+s/2;
+     ctx.globalAlpha=0.5;ctx.fillStyle='#c44';ctx.beginPath();ctx.arc(zx,zy,s*0.25,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    }
+   }
+   // Show items inside cone
+   for(let it of state.items){
+    if(it.x<vtBld.x||it.x>=vtBld.x+vtBld.w||it.y<vtBld.y||it.y>=vtBld.y+vtBld.h)continue;
+    let toI=Math.atan2(it.y+0.5-vt.y-0.5,it.x+0.5-vt.x-0.5);
+    let diff=Math.abs(toI-inAngle);if(diff>Math.PI)diff=2*Math.PI-diff;
+    if(diff<coneArc/2&&dist({x:vt.x+0.5,y:vt.y+0.5},{x:it.x+0.5,y:it.y+0.5})<coneLen/s){
+     let ix=it.x*s+s/2,iy=it.y*s+s/2;
+     ctx.globalAlpha=0.5;ctx.fillStyle='#ff0';ctx.beginPath();ctx.arc(ix,iy,s*0.15,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    }
+   }
+  }
+ }
+
  // Barrels
  for(let b of state.barrels){
   if(!b.alive)continue;
@@ -1330,15 +1610,11 @@ export function draw(){
   ctx.fillStyle='#ffaa00';ctx.beginPath();ctx.arc(ex,ey,radius*0.4,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
  }
 
- // Rock warnings
- for(let w of state.rockWarnings){
-  let wx=w.x*s+s/2,wy=w.y*s+s/2;
-  let alpha=0.3+0.3*Math.sin(state.tick*0.2);
-  ctx.globalAlpha=alpha;ctx.strokeStyle='#f00';ctx.lineWidth=3*state.scale;
-  ctx.beginPath();ctx.arc(wx,wy,s*1.5,0,Math.PI*2);ctx.stroke();
-  ctx.fillStyle='#f00';ctx.font='bold '+Math.floor(s*0.35)+'px sans-serif';ctx.textAlign='center';
-  ctx.fillText('\u26A0 '+w.fromDir,wx,wy-s*0.5);
-  ctx.globalAlpha=1;
+ // Rock projectiles
+ for(let r of state.rocks){
+  let rx=r.fx*s+s/2,ry=r.fy*s+s/2;
+  ctx.fillStyle='#888';ctx.beginPath();ctx.arc(rx,ry,s*0.2,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#666';ctx.beginPath();ctx.arc(rx-s*0.05,ry-s*0.05,s*0.12,0,Math.PI*2);ctx.fill();
  }
 
  // NPCs
@@ -1355,13 +1631,25 @@ export function draw(){
   }
   ctx.fillStyle=n.isLeader?'#fa0':'#0af';ctx.font='bold '+Math.floor(s*0.22)+'px sans-serif';ctx.textAlign='center';
   ctx.fillText(n.isLeader?'Chef':'PNJ',n.fx*s+s/2,n.fy*s-s*0.55);
+  if(n.speech){
+   let sx=n.fx*s+s/2,sy=n.fy*s-s*0.85;
+   ctx.font=Math.floor(s*0.2)+'px sans-serif';ctx.textAlign='center';
+   let tw=ctx.measureText(n.speech).width+s*0.3;
+   ctx.fillStyle='rgba(255,255,255,0.85)';
+   ctx.beginPath();ctx.roundRect(sx-tw/2,sy-s*0.15,tw,s*0.3,s*0.08);ctx.fill();
+   ctx.fillStyle='#222';ctx.fillText(n.speech,sx,sy+s*0.06);
+  }
  }
 
  // Zombies
  let sortedZ=state.zombies.filter(z=>z.alive).sort((a,b)=>a.fy-b.fy);
  for(let z of sortedZ){
+  // Hide zombies inside buildings the player isn't in
+  let zBld=getBuildingAt(z.x,z.y);
+  if(zBld&&zBld!==playerBld)continue;
   let atkAnim=z.atkTimer>0?(z.atkTimer/z.atkDuration):0;
-  drawZombie(ctx,z.fx*s+s/2,z.fy*s+s/2,s,z.angle,z.variant,atkAnim,z.isBoss,z.alerted);
+  let jumpOff=z.jumpAnim>0?Math.sin(z.jumpAnim/20*Math.PI)*s*0.5:0;
+  drawZombie(ctx,z.fx*s+s/2,z.fy*s+s/2-jumpOff,s,z.angle,z.variant,atkAnim,z.isBoss,z.alerted);
   let bw=s*(z.isBoss?1:0.7);
   let ox=z.isBoss?s*-0.02:s*0.15;
   ctx.fillStyle='#200';ctx.fillRect(z.fx*s+ox,z.fy*s-s*(z.isBoss?0.4:0.22),bw,s*0.08);
@@ -1369,6 +1657,11 @@ export function draw(){
   if(z.alerted){ctx.fillStyle='#f44';ctx.font='bold '+Math.floor(s*0.28)+'px sans-serif';ctx.textAlign='center';ctx.fillText('!',z.fx*s+s/2,z.fy*s-s*(z.isBoss?0.55:0.32))}
   if(z.isBoss){ctx.fillStyle='#fa0';ctx.font='bold '+Math.floor(s*0.24)+'px sans-serif';ctx.textAlign='center';ctx.fillText('BOSS',z.fx*s+s/2,z.fy*s-s*0.65)}
   if(z.hitSlowTimer>HIT_SLOW_DURATION-4){ctx.globalAlpha=0.3;ctx.fillStyle='#fff';ctx.fillRect(z.fx*s+s*0.1,z.fy*s+s*0.1,s*0.8,s*0.8);ctx.globalAlpha=1}
+  if(z.speech){
+   let sx=z.fx*s+s/2,sy=z.fy*s-s*(z.isBoss?0.8:0.5);
+   ctx.font='italic '+Math.floor(s*0.18)+'px sans-serif';ctx.textAlign='center';
+   ctx.globalAlpha=0.7;ctx.fillStyle='#c44';ctx.fillText(z.speech,sx,sy);ctx.globalAlpha=1;
+  }
  }
 
  // Bullets
@@ -1410,35 +1703,26 @@ export function draw(){
    let retX=pcx+Math.cos(retAngle)*clampedDist;
    let retY=pcy+Math.sin(retAngle)*clampedDist;
 
-   // Spread circle radius grows with distance
-   let spreadAtCursor=getSpreadAtDist(wepDef,p.precision,clampedTiles);
-   if(wepDef.name==='smg')spreadAtCursor+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
-   let circleRadius=Math.max(s*0.15,spreadAtCursor*clampedDist);
+   // Spread at cursor distance (radians) → pixel radius
+   let spreadRad=getSpreadAtDist(wepDef,p.precision,clampedTiles);
+   if(wepDef.name==='smg')spreadRad+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
+   let circleRadius=Math.max(s*0.12,Math.tan(spreadRad)*clampedDist);
 
-   // Spread cone from player to reticle
-   ctx.fillStyle='rgba(255,80,80,0.04)';
-   ctx.beginPath();ctx.moveTo(pcx,pcy);
-   ctx.lineTo(pcx+Math.cos(retAngle-spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle-spreadAtCursor)*clampedDist);
-   ctx.arc(pcx,pcy,clampedDist,retAngle-spreadAtCursor,retAngle+spreadAtCursor);
-   ctx.closePath();ctx.fill();
-
-   // Cone edge lines
-   ctx.strokeStyle='rgba(255,80,80,0.1)';ctx.lineWidth=1;ctx.setLineDash([s*0.1,s*0.08]);
-   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(retAngle-spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle-spreadAtCursor)*clampedDist);ctx.stroke();
-   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(pcx+Math.cos(retAngle+spreadAtCursor)*clampedDist,pcy+Math.sin(retAngle+spreadAtCursor)*clampedDist);ctx.stroke();
-   ctx.setLineDash([]);
+   // Thin aim line
+   ctx.strokeStyle='rgba(255,80,80,0.12)';ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(retX,retY);ctx.stroke();
 
    // Reticle circle at cursor (spread indicator)
-   ctx.strokeStyle='rgba(255,80,80,0.35)';ctx.lineWidth=1.5;
+   ctx.strokeStyle='rgba(255,80,80,0.4)';ctx.lineWidth=1.5;
    ctx.beginPath();ctx.arc(retX,retY,circleRadius,0,Math.PI*2);ctx.stroke();
-   // Small crosshair inside reticle
-   let ch=Math.max(3,circleRadius*0.3);
-   ctx.strokeStyle='rgba(255,80,80,0.5)';ctx.lineWidth=1;
+   // Crosshair
+   let ch=Math.max(3,circleRadius*0.35);
+   ctx.strokeStyle='rgba(255,80,80,0.55)';ctx.lineWidth=1;
    ctx.beginPath();ctx.moveTo(retX-ch,retY);ctx.lineTo(retX+ch,retY);ctx.stroke();
    ctx.beginPath();ctx.moveTo(retX,retY-ch);ctx.lineTo(retX,retY+ch);ctx.stroke();
 
-   // Max range ring (faint)
-   ctx.strokeStyle='rgba(255,80,80,0.06)';ctx.lineWidth=1;ctx.setLineDash([s*0.1,s*0.1]);
+   // Max range ring (faint dashed)
+   ctx.strokeStyle='rgba(255,80,80,0.05)';ctx.lineWidth=1;ctx.setLineDash([s*0.1,s*0.1]);
    ctx.beginPath();ctx.arc(pcx,pcy,maxPx,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
   }
  }
@@ -1505,6 +1789,13 @@ export function draw(){
   ctx.globalAlpha=1;
  }
 
+ // Confetti
+ for(let c of state.confetti){
+  let cx=c.x*s+s/2,cy=c.y*s+s/2;
+  ctx.globalAlpha=Math.min(1,c.life/30);ctx.fillStyle=c.color;
+  ctx.fillRect(cx-s*0.06,cy-s*0.06,s*0.12,s*0.12);ctx.globalAlpha=1;
+ }
+
  // SMG heat bar (near crosshair)
  if(wepDef&&wepDef.name==='smg'&&p.smgHeat>0.05){
   let pcx=p.fx*s+s/2,pcy=p.fy*s+s/2;
@@ -1528,7 +1819,7 @@ export function startGame(){
  initPlayer();
  state.player.x=Math.floor(MAP_W/2);state.player.y=Math.floor(MAP_H/2);
  state.player.fx=state.player.x;state.player.fy=state.player.y;
- state.gameOver=false;state.mapCount=0;state.kills=0;state.explosions=[];state.dmgFloaters=[];
+ state.gameOver=false;state.mapCount=0;state.kills=0;state.explosions=[];state.dmgFloaters=[];state.confetti=[];
  genMap();spawnPlayerInBuilding();
  msg('Survivez! Zone bleue = sortie. E = interagir.',3000);
  if(state.firstGame)state.showControls=true;
@@ -1537,7 +1828,7 @@ export function startGame(){
 export function retryWithSamePlayer(){
  state.gameOver=false;
  state.player.hp=state.player.maxHp;state.player.hitSlowTimer=0;state.player.postAttackSlow=0;state.player.smgHeat=0;
- state.explosions=[];state.dmgFloaters=[];
+ state.explosions=[];state.dmgFloaters=[];state.confetti=[];
  genMap();spawnPlayerInBuilding();state.mapCount++;
  msg('Nouvelle zone... Map #'+(state.mapCount+1),3000);emitChange();
 }
@@ -1547,7 +1838,7 @@ function nextMap(){
  p.hp=Math.min(p.maxHp,p.hp+Math.ceil(p.maxHp*0.3));
  p.hitSlowTimer=0;p.postAttackSlow=0;p.smgHeat=0;
  p.x=Math.floor(MAP_W/2);p.y=Math.floor(MAP_H/2);p.fx=p.x;p.fy=p.y;
- state.explosions=[];state.dmgFloaters=[];genMap();spawnPlayerInBuilding();
+ state.explosions=[];state.dmgFloaters=[];state.confetti=[];genMap();spawnPlayerInBuilding();
  msg('Zone '+(state.mapCount+1)+' | Nv.'+p.level+' | '+state.kills+' kills',3000);emitChange();
 }
 
