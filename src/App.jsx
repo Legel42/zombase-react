@@ -259,12 +259,12 @@ export default function App() {
 
       {state.message && <div className="message-toast">{state.message}</div>}
 
-      {state.baseEvent && !state.baseEventActive && (
+      {state.baseEvent && !state.baseEventActive && !state.baseRewardGiven && (
         <div className="base-hint">Parlez au chef (!) pour declencher la defense</div>
       )}
       {state.baseEventActive && (
         <div className="base-status">
-          DEFENSE DE BASE &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.length}
+          DEFENSE DE BASE &bull; Zombies: {state.hordeAlive} &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.length}
           {state.baseBoss && state.baseBoss.alive && ' &bull; BOSS'}
         </div>
       )}

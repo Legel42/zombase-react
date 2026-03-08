@@ -7,18 +7,18 @@ const COLORS={
  doorArmored:'#5a6a7a',doorArmoredTop:'#4a5a6a'
 };
 const SIGHT_RADIUS=7,GUNSHOT_ALERT_RADIUS=18,SAFE_SPAWN_RADIUS=14;
-export const BASE_HP_PLAYER=25,BASE_HP_ZOMBIE=50,BASE_DMG_ZOMBIE=5;
+export const BASE_HP_PLAYER=25,BASE_HP_ZOMBIE=50,BASE_DMG_ZOMBIE=8;
 const WEAPONS={
- bat:{name:'bat',type:'weapon',range:2.8,arc:Math.PI/2.5,dmg:13,cooldown:25,melee:true,label:'Batte'},
+ bat:{name:'bat',type:'weapon',range:2.8,arc:Math.PI/1.5,dmg:13,cooldown:45,melee:true,label:'Batte'},
  gun:{name:'gun',type:'weapon',range:15,dmg:25,cooldown:20,melee:false,label:'Pistolet',baseSpread:0.03},
  shotgun:{name:'shotgun',type:'weapon',range:9,dmg:18,cooldown:28,melee:false,pellets:5,baseSpread:0.22,label:'Fusil a pompe'},
- smg:{name:'smg',type:'weapon',range:12,dmg:10,cooldown:6,melee:false,label:'Mitraillette',baseSpread:0.06}
+ smg:{name:'smg',type:'weapon',range:12,dmg:10,cooldown:10,melee:false,label:'Mitraillette',baseSpread:0.06}
 };
 export const WEAPON_DEFS=WEAPONS;
 const ZOMBIE_ATK_RANGE=1.2;
 const HIT_SLOW_DURATION=20;
 const POST_ATTACK_SLOW_DURATION=60;
-const INTERACT_RANGE=1.4;
+const INTERACT_RANGE=1.8;
 const BARREL_EXPLOSION_RADIUS=3,BARREL_EXPLOSION_DMG=40,MAX_BARRELS=3;
 const XP_PER_KILL=5,XP_BOSS_MULT=10;
 const XP_PER_LEVEL=100;
@@ -58,8 +58,44 @@ export const state={
  firstGame:true,showControls:false,
  holdingE:false,holdETimer:0,draggingBarrel:null,
  baseEvent:false,baseEventActive:false,baseWaveTimer:0,baseWavesLeft:0,
- baseBoss:null,baseRewardGiven:false
+ baseBoss:null,baseRewardGiven:false,hordeAlive:0,
+ paused:false,pausePressed:false,
+ shakeTimer:0,shakeMaxTimer:0,shakeIntensity:0,
+ camInitialized:false,iFrames:0,dmgVignetteTimer:0
 };
+export const TICK_RATE=1000/60;
+// Audio system
+const music=new Audio('sounds/music.mp3');
+music.loop=true;music.volume=0.3;
+const sfx={
+ gun:new Audio('sounds/gun.mp3'),
+ shotgun:new Audio('sounds/shotgun.mp3'),
+ smg:new Audio('sounds/smg.mp3'),
+ bat:new Audio('sounds/bat.mp3'),
+ zombie_hit:new Audio('sounds/bat.mp3'),
+ zombie_alert:new Audio('sounds/zombie_alert.mp3'),
+ door:new Audio('sounds/door.mp3')
+};
+for(let k in sfx)sfx[k].volume=0.5;
+const audioPool={};
+function playSound(name){
+ let s=sfx[name];if(!s)return;
+ if(!audioPool[name])audioPool[name]=[];
+ let pool=audioPool[name];
+ for(let i=pool.length-1;i>=0;i--){if(pool[i].ended)pool.splice(i,1)}
+ if(pool.length>=8)return;
+ let c=s.cloneNode();c.volume=s.volume;c.play().catch(()=>{});
+ pool.push(c);
+}
+let musicStarted=false;
+function startMusic(){
+ if(musicStarted)return;
+ let tryPlay=()=>{music.play().then(()=>{musicStarted=true;document.removeEventListener('click',tryPlay);document.removeEventListener('keydown',tryPlay)}).catch(()=>{})};
+ tryPlay();
+ document.addEventListener('click',tryPlay);
+ document.addEventListener('keydown',tryPlay);
+}
+function stopMusic(){music.pause();music.currentTime=0;musicStarted=false}
 function emitChange(){state.onStateChange?.()}
 function msg(t,d=2000){
  state.message=t;clearTimeout(state.msgTimer);
@@ -92,15 +128,17 @@ function isBuildingOccupied(bld){
  for(let n of state.npcs){if(n.alive&&getBuildingAt(fl(n.fx),fl(n.fy))===bld)return true}
  return false;
 }
-function zombieCanEnter(tx,ty){
+function zombieCanEnter(tx,ty,alerted){
+ if(alerted)return true;
  let bld=getBuildingAt(tx,ty);
  return !bld||isBuildingOccupied(bld);
 }
 function getWallSide(bld,x,y){
- if(y===bld.y)return 'top';
- if(y===bld.y+bld.h-1)return 'bottom';
- if(x===bld.x)return 'left';
- if(x===bld.x+bld.w-1)return 'right';
+ let isTop=y===bld.y,isBot=y===bld.y+bld.h-1,isLeft=x===bld.x,isRight=x===bld.x+bld.w-1;
+ if(isTop&&isLeft)return 'tl';if(isTop&&isRight)return 'tr';
+ if(isBot&&isLeft)return 'bl';if(isBot&&isRight)return 'br';
+ if(isTop)return 'top';if(isBot)return 'bottom';
+ if(isLeft)return 'left';if(isRight)return 'right';
  return null;
 }
 function isWallBetween(x1,y1,x2,y2){
@@ -112,7 +150,7 @@ function isWallBetween(x1,y1,x2,y2){
   let cx=x1+sx*i+0.5|0,cy=y1+sy*i+0.5|0;
   if(cx>=0&&cy>=0&&cx<MAP_W&&cy<MAP_H){
    let t=state.map[cy][cx];
-   if(t===1||t===5)return true;
+   if(t===1||t===5||t===6)return true;
    if(t===3){let door=doorAt(cx,cy);if(door&&door.barricaded&&!door.open)return true}
   }
  }
@@ -161,7 +199,7 @@ function drawPlayer(ctx,cx,cy,s,angle,swingAnim,player){
  let u=s/32;
  let sel=player.inventory[player.selectedSlot];
  if(sel&&sel.name==='bat'){
-  let batLen=WEAPONS.bat.range*s/2*0.9;
+  let batLen=WEAPONS.bat.range*s/2*0.5;
   if(swingAnim>0){
    let swA=-WEAPONS.bat.arc/2+swingAnim*WEAPONS.bat.arc*1.2;
    ctx.save();ctx.rotate(swA);
@@ -275,7 +313,7 @@ function initPlayer(){
   inventory:[{type:'weapon',name:'bat',ammo:0},null,null,null,null],
   selectedSlot:0,cooldown:0,angle:0,
   fx:Math.floor(MAP_W/2),fy:Math.floor(MAP_H/2),
-  swingTimer:0,swingDuration:15,hitSlowTimer:0,isAttacking:false,
+  swingTimer:0,swingDuration:25,hitSlowTimer:0,isAttacking:false,
   postAttackSlow:0,xp:0,level:1,ammo:0,smgHeat:0
  };
 }
@@ -315,7 +353,7 @@ function statName(s){
 }
 function getZombieLevel(){
  let lv=1;
- if(state.mapCount>=5)lv+=Math.floor((state.mapCount-4)/2);
+ if(state.mapCount>=5)lv+=Math.ceil((state.mapCount-4)/2);
  return lv;
 }
 function getBossLevel(){return getZombieLevel()+Math.floor((state.mapCount+1)/5)*5}
@@ -330,12 +368,12 @@ function makeZombie(x,y,level){
   alive:true,alerted:false,variant:rand(0,1),
   angle:Math.random()*Math.PI*2,hitSlowTimer:0,isAttacking:false,
   postAttackSlow:0,isBoss:false,speech:null,speechTimer:0,alertDelay:0,jumpAnim:0,
-  stuckTimer:0,lastFx:x,lastFy:y};
+  stuckTimer:0,stuckOriginX:x,stuckOriginY:y,stuckPerp:0,stuckPerpTimer:0};
 }
 function makeBossZombie(x,y){
- let lv=getZombieLevel();
+ let lv=getBossLevel();
  let hp=300+lv*50;
- return{x,y,hp,maxHp:hp,atk:20+lv*5,armor:15+lv*3,precision:8,
+ return{x,y,hp,maxHp:hp,atk:20+lv*8,armor:15+lv*3,precision:8+lv,
   speed:2+Math.floor(lv/4),fx:x,fy:y,
   cooldown:0,atkCooldown:50,atkTimer:0,atkDuration:20,
   alive:true,alerted:true,variant:0,
@@ -343,12 +381,14 @@ function makeBossZombie(x,y){
   postAttackSlow:0,isBoss:true,throwCooldown:0,throwTimer:0};
 }
 function makeNPC(x,y,weapon,isLeader){
- let hp=isLeader?105:60;
+ let lv=getNPCLevel();
+ let hp=(isLeader?105:60)+lv*10;
  return{x,y,fx:x,fy:y,hp,maxHp:hp,
-  atk:isLeader?5:2,armor:isLeader?5:2,precision:isLeader?6:3,speed:isLeader?3:2,
+  atk:(isLeader?5:2)+lv*2,armor:(isLeader?5:2)+lv,precision:(isLeader?6:3)+lv,speed:isLeader?3:2,
   weapon,isLeader,alive:true,angle:0,_moving:false,
   cooldown:0,atkCooldown:weapon==='bat'?30:25,speech:null,speechTimer:0,
-  stuckTimer:0,lastFx:x,lastFy:y};
+  stuckTimer:0,stuckOriginX:x,stuckOriginY:y,stuckPerp:0,stuckPerpTimer:0,
+  retreatTimer:0,retreatAngle:0};
 }
 function genMap(){
  state.map=Array.from({length:MAP_H},()=>Array(MAP_W).fill(0));
@@ -563,7 +603,7 @@ function alertZombiesNear(px,py,radius){
   if(distXY(px,py,z.fx,z.fy)>radius)continue;
   if(isWallBetween(px,py,z.fx,z.fy))continue;
   if(playerInside&&!isInBuilding(z.x,z.y))continue;
-  z.alerted=true;z.alertDelay=60;z.jumpAnim=20;
+  z.alerted=true;z.alertDelay=60;z.jumpAnim=20;playSound('zombie_alert');
  }
 }
 function gunShotSpawnZombies(weaponName){
@@ -626,7 +666,7 @@ function explodeBarrel(barrel){
    let dmg=Math.max(1,Math.floor(BARREL_EXPLOSION_DMG*(1-pd/BARREL_EXPLOSION_RADIUS)));
    state.player.hp-=dmg;state.player.hitSlowTimer=HIT_SLOW_DURATION;
    addFloater(state.player.fx,state.player.fy,'-'+dmg,'#f44');
-   if(state.player.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
+   if(state.player.hp<=0){state.gameOver=true;stopMusic();state.onDeath?.();emitChange()}
   }
   for(let ob of state.barrels){
    if(!ob.alive||ob===b)continue;
@@ -643,28 +683,38 @@ function getWeaponDef(sel){
 function meleeAttack(p){
  let wep=getWeaponDef(p.inventory[p.selectedSlot]);
  if(!wep)return;
- p.cooldown=Math.max(10,wep.cooldown-p.speed*2);
+ p.cooldown=wep.cooldown;
+ playSound('bat');
  let range=wep.range,arc=wep.arc||Math.PI/2;
+ // Find closest zombie in arc
+ let bestZ=null,bestD=Infinity;
  for(let z of state.zombies){
   if(!z.alive)continue;
   let d=distXY(p.fx,p.fy,z.fx,z.fy);
-  if(d<range&&!isWallBetween(p.fx,p.fy,z.fx,z.fy)){
+  if(d<range&&d<bestD&&!isWallBetween(p.fx,p.fy,z.fx,z.fy)){
    let toZ=Math.atan2(z.fy-p.fy,z.fx-p.fx);
    let diff=Math.abs(toZ-p.angle);if(diff>Math.PI)diff=2*Math.PI-diff;
-   if(diff<arc/2){
-    let hitChance=wep.melee?0.99:(p.precision+3)/10;
-    if(Math.random()<hitChance){
-     let dmg=Math.max(1,wep.dmg+p.atk+3-Math.floor(z.armor/3));
-     z.hp-=dmg;z.alerted=true;z.alertDelay=0;z.hitSlowTimer=HIT_SLOW_DURATION;
-     addFloater(z.fx,z.fy,'-'+dmg,'#fc0');
-     if(z.hp<=0){
-      z.alive=false;zombieDrop(z.x,z.y);state.kills++;
-      addXP(p,z.isBoss?XP_PER_KILL*XP_BOSS_MULT:XP_PER_KILL);
-      addFloater(z.fx,z.fy-0.5,'KILL','#f44');
-     }
-    }else{addFloater(z.fx,z.fy,'Rate','#888')}
-   }
+   if(diff<arc/2){bestZ=z;bestD=d}
   }
+ }
+ if(bestZ){
+  let z=bestZ;
+  let hitChance=wep.melee?0.99:(p.precision+3)/10;
+  if(Math.random()<hitChance){
+   let dmg=Math.max(1,wep.dmg+p.atk+3-Math.floor(z.armor/3));
+   z.hp-=dmg;z.alerted=true;z.alertDelay=0;z.hitSlowTimer=HIT_SLOW_DURATION;
+   let ka=Math.atan2(z.fy-p.fy,z.fx-p.fx),kb=z.isBoss?0.2:0.5;
+   let kx=z.fx+Math.cos(ka)*kb,ky=z.fy+Math.sin(ka)*kb;
+   if(canWalk(fl(kx),fl(z.fy)))z.fx=kx;
+   if(canWalk(fl(z.fx),fl(ky)))z.fy=ky;
+   z.x=fl(z.fx);z.y=fl(z.fy);
+   addFloater(z.fx,z.fy,'-'+dmg,'#fc0');
+   if(z.hp<=0){
+    z.alive=false;zombieDrop(z.x,z.y);state.kills++;
+    addXP(p,z.isBoss?XP_PER_KILL*XP_BOSS_MULT:XP_PER_KILL);
+    addFloater(z.fx,z.fy-0.5,'KILL','#f44');
+   }
+  }else{addFloater(z.fx,z.fy,'Rate','#888')}
  }
  for(let b of state.barrels){
   if(!b.alive)continue;
@@ -709,6 +759,7 @@ function shootOneBullet(p,wep,shotAngle){
 function shootAttack(p){
  let sel=p.inventory[p.selectedSlot];
  let wep=getWeaponDef(sel);if(!wep)return;
+ playSound(wep.name);
  p.cooldown=Math.max(4,wep.cooldown-Math.floor(p.speed));
  alertZombiesNear(p.fx,p.fy,GUNSHOT_ALERT_RADIUS);
  gunShotSpawnZombies(wep.name);
@@ -716,7 +767,7 @@ function shootAttack(p){
  let pwx=p.fx*s-state.cam.x+s/2,pwy=p.fy*s-state.cam.y+s/2;
  let mouseDist=Math.hypot(state.mouseX-pwx,state.mouseY-pwy)/s;
  let spreadAtDist=getSpreadAtDist(wep,p.precision,mouseDist);
- if(wep.name==='smg')spreadAtDist+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
+ if(wep.name==='smg')spreadAtDist=Math.min(spreadAtDist+p.smgHeat*SMG_HEAT_SPREAD_MULT,wep.baseSpread*1.5+DIST_SPREAD_FACTOR*mouseDist);
  if(wep.pellets){
   let anyHit=false;
   for(let pi=0;pi<wep.pellets;pi++){
@@ -761,6 +812,41 @@ function getNearestInteraction(p){
 }
 function updateNPC(npc){
  if(!npc.alive)return;
+ // Retreat phase: run backward and shoot
+ if(npc.retreatTimer>0){
+  npc.retreatTimer--;
+  let spd=0.03+npc.speed*0.006;
+  let rx=npc.fx+Math.cos(npc.retreatAngle)*spd,ry=npc.fy+Math.sin(npc.retreatAngle)*spd;
+  let rCanX=canWalk(fl(rx),fl(npc.fy)),rCanY=canWalk(fl(npc.fx),fl(ry));
+  if(rCanX)npc.fx=rx;
+  if(rCanY)npc.fy=ry;
+  if(!rCanX){let bd=doorAt(fl(rx),fl(npc.fy));if(bd&&bd.barricaded&&!bd.open)bd.open=true}
+  if(!rCanY){let bd=doorAt(fl(npc.fx),fl(ry));if(bd&&bd.barricaded&&!bd.open)bd.open=true}
+  npc.x=fl(npc.fx);npc.y=fl(npc.fy);npc._moving=true;
+  // Try to shoot while retreating
+  let wep=WEAPONS[npc.weapon];
+  if(wep&&!wep.melee&&npc.cooldown<=0){
+   let nearZ=null,nnd=Infinity;
+   for(let z of state.zombies){if(!z.alive)continue;let d=distXY(npc.fx,npc.fy,z.fx,z.fy);if(d<nnd){nearZ=z;nnd=d}}
+   if(nearZ&&nnd<wep.range&&!isWallBetween(npc.fx,npc.fy,nearZ.fx,nearZ.fy)){
+    npc.angle=Math.atan2(nearZ.fy-npc.fy,nearZ.fx-npc.fx);
+    npc.cooldown=wep.cooldown;playSound(wep.name);
+    let adx=Math.cos(npc.angle),ady=Math.sin(npc.angle);
+    let npcBullet={x:npc.fx,y:npc.fy,angle:npc.angle,maxDist:wep.range,hitDist:wep.range,life:6};
+    state.bullets.push(npcBullet);
+    for(let i=1;i<wep.range;i++){
+     let sx=Math.floor(npc.fx+0.5+adx*i),sy=Math.floor(npc.fy+0.5+ady*i);
+     if(sx<0||sy<0||sx>=MAP_W||sy>=MAP_H){npcBullet.hitDist=i;break}
+     let t=state.map[sy][sx];if(t===1||t===5||t===6){npcBullet.hitDist=i;break}
+     let hit=state.zombies.find(z=>z.alive&&distXY(z.fx,z.fy,npc.fx+0.5+adx*i,npc.fy+0.5+ady*i)<0.9);
+     if(hit){npcBullet.hitDist=i;let dmg=Math.max(1,wep.dmg+npc.atk);hit.hp-=dmg;hit.hitSlowTimer=HIT_SLOW_DURATION;hit.alerted=true;
+      if(hit.hp<=0){hit.alive=false;zombieDrop(hit.x,hit.y);addXP(state.player,XP_PER_KILL);state.kills++}break}
+    }
+   }
+  }
+  if(npc.cooldown>0)npc.cooldown--;
+  return;
+ }
  let nearestZ=null,nd=Infinity;
  for(let z of state.zombies){
   if(!z.alive)continue;
@@ -775,9 +861,25 @@ function updateNPC(npc){
   npc._moving=true;
   let spd=0.02+npc.speed*0.005;
   let adx=nearestZ.fx-npc.fx,ady=nearestZ.fy-npc.fy,len=Math.hypot(adx,ady)||1;
-  if(npc.stuckTimer>30){
-   let ba=npc.angle+(Math.random()-0.5)*Math.PI;
-   adx=Math.cos(ba);ady=Math.sin(ba);len=1;npc.stuckTimer=0;
+  npc.stuckTimer++;
+  if(npc.stuckPerp===0&&npc.stuckTimer>=90){
+   let movedDist=Math.hypot(npc.fx-npc.stuckOriginX,npc.fy-npc.stuckOriginY);
+   if(movedDist<0.3){
+    let pA={x:-ady/len,y:adx/len},pB={x:ady/len,y:-adx/len};
+    let dA=Math.hypot(npc.fx+pA.x*2-nearestZ.fx,npc.fy+pA.y*2-nearestZ.fy);
+    let dB=Math.hypot(npc.fx+pB.x*2-nearestZ.fx,npc.fy+pB.y*2-nearestZ.fy);
+    npc.stuckPerp=dA<=dB?1:-1;npc.stuckPerpTimer=120;
+   }
+   npc.stuckOriginX=npc.fx;npc.stuckOriginY=npc.fy;npc.stuckTimer=0;
+  }
+  if(npc.stuckPerp!==0){
+   npc.stuckPerpTimer--;
+   if(npc.stuckPerpTimer<=0){
+    let testX=npc.fx+adx/len*0.5,testY=npc.fy+ady/len*0.5;
+    if(canWalk(fl(testX),fl(testY))){npc.stuckPerp=0}
+    else{npc.stuckPerpTimer=60}
+   }
+   if(npc.stuckPerp!==0){let dx0=adx/len,dy0=ady/len;adx=-dy0*npc.stuckPerp;ady=dx0*npc.stuckPerp;len=1}
   }
   let nx=npc.fx+adx/len*spd,ny=npc.fy+ady/len*spd;
   let nCanX=canWalk(fl(nx),fl(npc.fy));
@@ -796,19 +898,23 @@ function updateNPC(npc){
    }else if(c1){npc.fx=px1;npc.fy=py1}
    else if(c2){npc.fx=px2;npc.fy=py2}
   }else if(!nCanX){
-   let su=canWalk(fl(nx),Math.floor((npc.fy-spd)+0.5));
-   let sd=canWalk(fl(nx),Math.floor((npc.fy+spd)+0.5));
+   let su=canWalk(fl(nx),fl(npc.fy-spd));
+   let sd=canWalk(fl(nx),fl(npc.fy+spd));
    if(su&&sd){if(Math.abs(nearestZ.fy-(npc.fy-spd))<Math.abs(nearestZ.fy-(npc.fy+spd)))npc.fy-=spd;else npc.fy+=spd}
    else if(su)npc.fy-=spd;else if(sd)npc.fy+=spd;
   }else if(!nCanY){
-   let sl=canWalk(Math.floor((npc.fx-spd)+0.5),fl(ny));
-   let sr=canWalk(Math.floor((npc.fx+spd)+0.5),fl(ny));
+   let sl=canWalk(fl(npc.fx-spd),fl(ny));
+   let sr=canWalk(fl(npc.fx+spd),fl(ny));
    if(sl&&sr){if(Math.abs(nearestZ.fx-(npc.fx-spd))<Math.abs(nearestZ.fx-(npc.fx+spd)))npc.fx-=spd;else npc.fx+=spd}
    else if(sl)npc.fx-=spd;else if(sr)npc.fx+=spd;
   }
+  // NPC opens barricaded doors in the way
+  if(!nCanX||!nCanY){
+   let checkTx=fl(nx),checkTy=fl(ny);
+   if(!nCanX){let bd=doorAt(checkTx,fl(npc.fy));if(bd&&bd.barricaded&&!bd.open){bd.open=true}}
+   if(!nCanY){let bd=doorAt(fl(npc.fx),checkTy);if(bd&&bd.barricaded&&!bd.open){bd.open=true}}
+  }
   npc.x=fl(npc.fx);npc.y=fl(npc.fy);
-  if(Math.abs(npc.fx-npc.lastFx)<0.01&&Math.abs(npc.fy-npc.lastFy)<0.01)npc.stuckTimer++;else npc.stuckTimer=0;
-  npc.lastFx=npc.fx;npc.lastFy=npc.fy;
  }else{npc._moving=false}
  if(npc.cooldown>0){npc.cooldown--;return}
  if(nd<1.5&&!isWallBetween(npc.fx,npc.fy,nearestZ.fx,nearestZ.fy)){
@@ -817,17 +923,33 @@ function updateNPC(npc){
    let dmg=Math.max(1,3+npc.atk);
    nearestZ.hp-=dmg;nearestZ.alerted=true;nearestZ.hitSlowTimer=HIT_SLOW_DURATION;
    addFloater(nearestZ.fx,nearestZ.fy,'-'+dmg,'#0af');
+   // Knockback zombie
+   let ka=Math.atan2(nearestZ.fy-npc.fy,nearestZ.fx-npc.fx),kb=0.4;
+   let kx=nearestZ.fx+Math.cos(ka)*kb,ky=nearestZ.fy+Math.sin(ka)*kb;
+   if(canWalk(fl(kx),fl(nearestZ.fy)))nearestZ.fx=kx;
+   if(canWalk(fl(nearestZ.fx),fl(ky)))nearestZ.fy=ky;
+   nearestZ.x=fl(nearestZ.fx);nearestZ.y=fl(nearestZ.fy);
    if(nearestZ.hp<=0){nearestZ.alive=false;zombieDrop(nearestZ.x,nearestZ.y);addXP(state.player,XP_PER_KILL);state.kills++}
   }
- }else if(wep&&wep.melee&&nd<wep.range){
+  // NPC retreats after melee hit
+  npc.retreatAngle=Math.atan2(npc.fy-nearestZ.fy,npc.fx-nearestZ.fx);
+  npc.retreatTimer=60;
+ }else if(wep&&wep.melee&&nd<wep.range&&!isWallBetween(npc.fx,npc.fy,nearestZ.fx,nearestZ.fy)){
   npc.cooldown=wep.cooldown;
   if(Math.random()*10<npc.precision+2){
    let dmg=Math.max(1,wep.dmg+npc.atk);
    nearestZ.hp-=dmg;nearestZ.alerted=true;nearestZ.hitSlowTimer=HIT_SLOW_DURATION;
+   let ka=Math.atan2(nearestZ.fy-npc.fy,nearestZ.fx-npc.fx),kb=0.5;
+   let kx=nearestZ.fx+Math.cos(ka)*kb,ky=nearestZ.fy+Math.sin(ka)*kb;
+   if(canWalk(fl(kx),fl(nearestZ.fy)))nearestZ.fx=kx;
+   if(canWalk(fl(nearestZ.fx),fl(ky)))nearestZ.fy=ky;
+   nearestZ.x=fl(nearestZ.fx);nearestZ.y=fl(nearestZ.fy);
    if(nearestZ.hp<=0){nearestZ.alive=false;zombieDrop(nearestZ.x,nearestZ.y);addXP(state.player,XP_PER_KILL);state.kills++}
   }
- }else if(wep&&!wep.melee&&nd<wep.range){
-  npc.cooldown=wep.cooldown;
+  npc.retreatAngle=Math.atan2(npc.fy-nearestZ.fy,npc.fx-nearestZ.fx);
+  npc.retreatTimer=60;
+ }else if(wep&&!wep.melee&&nd<wep.range&&!isWallBetween(npc.fx,npc.fy,nearestZ.fx,nearestZ.fy)){
+  npc.cooldown=wep.cooldown;playSound(wep.name);
   let adx=Math.cos(npc.angle),ady=Math.sin(npc.angle);
   let npcBullet={x:npc.fx,y:npc.fy,angle:npc.angle,maxDist:wep.range,hitDist:wep.range,life:6};
   state.bullets.push(npcBullet);
@@ -852,7 +974,8 @@ function bossThrowRock(boss,target){
  state.rockWarnings.push({fx:boss.fx,fy:boss.fy,angle,timer:45,boss});
 }
 function launchRock(w){
- state.rocks.push({fx:w.fx,fy:w.fy,angle:w.angle,spd:0.25,dmg:30+rand(0,15),life:80,active:true});
+ let lv=getBossLevel();
+ state.rocks.push({fx:w.fx,fy:w.fy,angle:w.angle,spd:0.25,dmg:30+lv*5+rand(0,15),life:80,active:true});
 }
 const HORDE_TOTAL=50,HORDE_WAVES=4;
 function startBaseAssault(){
@@ -860,6 +983,39 @@ function startBaseAssault(){
  state.baseWavesLeft=HORDE_WAVES;
  state.baseWaveTimer=0;
  state.hordeSpawned=0;
+ // Assign defense posts around base (outside, spread out)
+ let b=state.buildings[0];
+ let baseDoors=state.doors.filter(d=>d.building===b);
+ let posts=[];
+ let cx=b.x+b.w/2,cy=b.y+b.h/2;
+ // Posts outside each door (3-5 tiles out)
+ for(let d of baseDoors){
+  let side=getWallSide(b,d.x,d.y);
+  for(let dist=3;dist<=5;dist++){
+   let ox=d.x,oy=d.y;
+   if(side==='top')oy-=dist;else if(side==='bottom')oy+=dist;
+   else if(side==='left')ox-=dist;else if(side==='right')ox+=dist;
+   ox=clamp(ox,1,MAP_W-2);oy=clamp(oy,1,MAP_H-2);
+   if(canWalk(ox,oy)){posts.push({x:ox,y:oy});break}
+  }
+ }
+ // Spread remaining posts around the perimeter
+ let needed=state.npcs.length-posts.length;
+ for(let i=0;i<needed;i++){
+  let ang=((posts.length+i)/state.npcs.length)*Math.PI*2;
+  let r=Math.max(b.w,b.h)/2+4;
+  for(let tr=0;tr<6;tr++){
+   let px=clamp(Math.round(cx+Math.cos(ang)*(r+tr)),1,MAP_W-2);
+   let py=clamp(Math.round(cy+Math.sin(ang)*(r+tr)),1,MAP_H-2);
+   if(canWalk(px,py)){posts.push({x:px,y:py});break}
+  }
+ }
+ for(let i=0;i<state.npcs.length;i++){
+  let n=state.npcs[i];
+  n.defenseX=posts[i%posts.length].x;n.defenseY=posts[i%posts.length].y;n.defenseReached=false;
+ }
+ // Open all base doors so NPCs can move freely
+ for(let d of baseDoors){if(d.barricaded)d.open=true}
  msg('ALERTE! Les zombies attaquent la base!',3000);
  spawnAssaultWave();
 }
@@ -900,7 +1056,7 @@ export function update(){
  if(p.postAttackSlow>0)p.postAttackSlow--;
  if(p.swingTimer>0)p.swingTimer--;
  if(p.cooldown>0){p.cooldown--;p.isAttacking=true}
- else{if(p.isAttacking){p.postAttackSlow=POST_ATTACK_SLOW_DURATION}p.isAttacking=false}
+ else{p.isAttacking=false}
  if(p.smgHeat>0)p.smgHeat=Math.max(0,p.smgHeat-SMG_HEAT_DECAY);
  let s=TILE*state.scale;
  let pwx=p.fx*s-state.cam.x,pwy=p.fy*s-state.cam.y;
@@ -913,6 +1069,10 @@ export function update(){
  if(dx||dy){
   let rawSpd=Math.min(p.speed,20);
   let spd=(0.05+rawSpd*0.01)*getSpeedMult(p);
+  // -25% speed when not looking in movement direction
+  let moveAngle=Math.atan2(dy,dx);
+  let angleDiff=Math.abs(moveAngle-p.angle);if(angleDiff>Math.PI)angleDiff=2*Math.PI-angleDiff;
+  if(angleDiff>Math.PI/2)spd*=0.5;
   let nx=p.fx+dx*spd,ny=p.fy+dy*spd;
   if(canWalk(Math.floor(nx+(dx>0?0.4:-0.4)+0.5),fl(p.fy)))p.fx=nx;
   if(canWalk(fl(p.fx),Math.floor(ny+(dy>0?0.4:-0.4)+0.5)))p.fy=ny;
@@ -930,7 +1090,7 @@ export function update(){
   if(state.mouseDown&&!state.attackPressed&&p.cooldown<=0){
    state.attackPressed=true;
    if(wep){
-    if(wep.melee){meleeAttack(p);p.swingTimer=p.swingDuration}
+    if(wep.melee){meleeAttack(p);p.swingTimer=p.cooldown;p.swingDuration=p.cooldown}
     else{if(p.ammo>0){shootAttack(p);p.ammo--}else msg('Plus de munitions!')}
    }else msg('Selectionnez une arme (1-5)');
   }
@@ -940,7 +1100,7 @@ export function update(){
   if(!state.holdingE){
    state.holdingE=true;state.holdETimer=0;
    let didInteract=false;
-   if(state.baseEvent&&!state.baseEventActive){
+   if(state.baseEvent&&!state.baseEventActive&&!state.baseRewardGiven){
     let leader=state.npcs.find(n=>n.alive&&n.isLeader);
     if(leader&&distXY(p.fx,p.fy,leader.fx,leader.fy)<INTERACT_RANGE){
      startBaseAssault();didInteract=true;
@@ -948,7 +1108,7 @@ export function update(){
    }
    if(!didInteract){
     let door=state.doors.find(d=>distXY(d.x+0.5,d.y+0.5,p.fx,p.fy)<INTERACT_RANGE&&d.barricaded);
-    if(door){door.open=!door.open;msg(door.open?'Porte ouverte':'Porte fermee');didInteract=true}
+    if(door){door.open=!door.open;playSound('door');msg(door.open?'Porte ouverte':'Porte fermee');didInteract=true}
    }
    if(!didInteract){
     let found=findNearestInteractable(p);
@@ -1013,6 +1173,13 @@ export function update(){
  for(let n of state.npcs){if(n.alive)targets.push({x:n.fx,y:n.fy,fx:n.fx,fy:n.fy,isNPC:true,npc:n,hp:n.hp,isLeader:n.isLeader})}
  for(let z of state.zombies){
   if(!z.alive)continue;
+  // Fix wall clip: push zombie out if stuck in unwalkable tile
+  if(!canWalk(fl(z.fx),fl(z.fy))){
+   for(let r=1;r<=2;r++)for(let ddx=-r;ddx<=r;ddx++)for(let ddy=-r;ddy<=r;ddy++){
+    let tx=fl(z.fx)+ddx,ty=fl(z.fy)+ddy;
+    if(canWalk(tx,ty)){z.fx=tx;z.fy=ty;z.x=tx;z.y=ty;r=3;break}
+   }
+  }
   if(z.cooldown>0)z.cooldown--;
   if(z.hitSlowTimer>0)z.hitSlowTimer--;
   if(z.postAttackSlow>0)z.postAttackSlow--;
@@ -1027,14 +1194,14 @@ export function update(){
   }
   let actualDist=bestTarget?distXY(z.fx,z.fy,bestTarget.x,bestTarget.y):Infinity;
   if(!z.alerted&&actualDist<=SIGHT_RADIUS){
-   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){z.alerted=true;z.alertDelay=60;z.jumpAnim=20}
+   if(!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){z.alerted=true;z.alertDelay=60;z.jumpAnim=20;playSound('zombie_alert')}
   }
   if(z.alertDelay>0){z.alertDelay--;z.jumpAnim=Math.max(0,z.jumpAnim-1)}
   if(!z.alerted){
    if(z.wanderTimer!==undefined){
     z.wanderTimer--;
-    if(z.wanderTimer<=0){z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(90,240)}
-    let wspd=0.008;
+    if(z.wanderTimer<=0){z.wanderAngle=Math.random()*Math.PI*2;z.wanderTimer=rand(60,180)}
+    let wspd=0.015;
     let wnx=z.fx+Math.cos(z.wanderAngle)*wspd,wny=z.fy+Math.sin(z.wanderAngle)*wspd;
     let wCanW=canWalk(fl(wnx),fl(wny))&&zombieCanEnter(fl(wnx),fl(wny));
     if(wCanW){z.fx=wnx;z.fy=wny}
@@ -1057,20 +1224,37 @@ export function update(){
    z.angle=Math.atan2(bestTarget.fy-z.fy,bestTarget.fx-z.fx);
    let zspd=(0.02+z.speed*0.008)*getSpeedMult(z);
    let adx=bestTarget.fx-z.fx,ady=bestTarget.fy-z.fy,len=Math.hypot(adx,ady)||1;
-   if(z.stuckTimer>30){
-    let ba=z.angle+(Math.random()-0.5)*Math.PI;
-    adx=Math.cos(ba);ady=Math.sin(ba);len=1;z.stuckTimer=0;
+   z.stuckTimer++;
+   if(z.stuckPerp===0&&z.stuckTimer>=90){
+    let movedDist=Math.hypot(z.fx-z.stuckOriginX,z.fy-z.stuckOriginY);
+    if(movedDist<0.3){
+     let pA={x:-ady/len,y:adx/len},pB={x:ady/len,y:-adx/len};
+     let tA=z.fx+pA.x*2,tAy=z.fy+pA.y*2,tB=z.fx+pB.x*2,tBy=z.fy+pB.y*2;
+     let dA=Math.hypot(tA-bestTarget.fx,tAy-bestTarget.fy);
+     let dB=Math.hypot(tB-bestTarget.fx,tBy-bestTarget.fy);
+     z.stuckPerp=dA<=dB?1:-1;z.stuckPerpTimer=120;
+    }
+    z.stuckOriginX=z.fx;z.stuckOriginY=z.fy;z.stuckTimer=0;
+   }
+   if(z.stuckPerp!==0){
+    z.stuckPerpTimer--;
+    if(z.stuckPerpTimer<=0){
+     let testX=z.fx+adx/len*0.5,testY=z.fy+ady/len*0.5;
+     if(canWalk(fl(testX),fl(testY))&&zombieCanEnter(fl(testX),fl(testY),true)){z.stuckPerp=0}
+     else{z.stuckPerpTimer=60}
+    }
+    if(z.stuckPerp!==0){let dx0=adx/len,dy0=ady/len;adx=-dy0*z.stuckPerp;ady=dx0*z.stuckPerp;len=1}
    }
    let nx=z.fx+adx/len*zspd,ny=z.fy+ady/len*zspd;
-   let canX=canWalk(fl(nx),fl(z.fy))&&zombieCanEnter(fl(nx),fl(z.fy));
-   let canY=canWalk(fl(z.fx),fl(ny))&&zombieCanEnter(fl(z.fx),fl(ny));
+   let canX=canWalk(fl(nx),fl(z.fy))&&zombieCanEnter(fl(nx),fl(z.fy),true);
+   let canY=canWalk(fl(z.fx),fl(ny))&&zombieCanEnter(fl(z.fx),fl(ny),true);
    if(canX)z.fx=nx;
    if(canY)z.fy=ny;
    if(!canX&&!canY){
     let perpX=z.fx+ady/len*zspd,perpX2=z.fx-ady/len*zspd;
     let perpY=z.fy+adx/len*zspd,perpY2=z.fy-adx/len*zspd;
-    let cA=canWalk(fl(perpX),fl(perpY))&&zombieCanEnter(fl(perpX),fl(perpY));
-    let cB=canWalk(fl(perpX2),fl(perpY2))&&zombieCanEnter(fl(perpX2),fl(perpY2));
+    let cA=canWalk(fl(perpX),fl(perpY))&&zombieCanEnter(fl(perpX),fl(perpY),true);
+    let cB=canWalk(fl(perpX2),fl(perpY2))&&zombieCanEnter(fl(perpX2),fl(perpY2),true);
     if(cA&&cB){
      let dA=Math.hypot(perpX-bestTarget.fx,perpY-bestTarget.fy);
      let dB=Math.hypot(perpX2-bestTarget.fx,perpY2-bestTarget.fy);
@@ -1079,19 +1263,17 @@ export function update(){
     else if(cB){z.fx=perpX2;z.fy=perpY2}
    }else if(!canX){
     let slideUp=z.fy-zspd,slideDown=z.fy+zspd;
-    let sU=canWalk(fl(nx),fl(slideUp))&&zombieCanEnter(fl(nx),fl(slideUp));
-    let sD=canWalk(fl(nx),fl(slideDown))&&zombieCanEnter(fl(nx),fl(slideDown));
+    let sU=canWalk(fl(nx),fl(slideUp))&&zombieCanEnter(fl(nx),fl(slideUp),true);
+    let sD=canWalk(fl(nx),fl(slideDown))&&zombieCanEnter(fl(nx),fl(slideDown),true);
     if(sU&&sD){if(Math.abs(bestTarget.fy-slideUp)<Math.abs(bestTarget.fy-slideDown))z.fy=slideUp;else z.fy=slideDown}
     else if(sU)z.fy=slideUp;else if(sD)z.fy=slideDown;
    }else if(!canY){
     let slideLeft=z.fx-zspd,slideRight=z.fx+zspd;
-    let sL=canWalk(fl(slideLeft),fl(ny))&&zombieCanEnter(fl(slideLeft),fl(ny));
-    let sR=canWalk(fl(slideRight),fl(ny))&&zombieCanEnter(fl(slideRight),fl(ny));
+    let sL=canWalk(fl(slideLeft),fl(ny))&&zombieCanEnter(fl(slideLeft),fl(ny),true);
+    let sR=canWalk(fl(slideRight),fl(ny))&&zombieCanEnter(fl(slideRight),fl(ny),true);
     if(sL&&sR){if(Math.abs(bestTarget.fx-slideLeft)<Math.abs(bestTarget.fx-slideRight))z.fx=slideLeft;else z.fx=slideRight}
     else if(sL)z.fx=slideLeft;else if(sR)z.fx=slideRight;
    }
-   if(Math.abs(z.fx-z.lastFx)<0.01&&Math.abs(z.fy-z.lastFy)<0.01)z.stuckTimer++;else z.stuckTimer=0;
-   z.lastFx=z.fx;z.lastFy=z.fy;
    if(!canX||!canY){
     let checkX=fl(nx),checkY=fl(ny);
     let blockedDoor=null;
@@ -1108,18 +1290,28 @@ export function update(){
    }
    z.x=fl(z.fx);z.y=fl(z.fy);
    if(actualDist<ZOMBIE_ATK_RANGE&&z.cooldown<=0&&!isWallBetween(z.fx,z.fy,bestTarget.fx,bestTarget.fy)){
-    z.cooldown=z.atkCooldown;z.atkTimer=z.atkDuration;
+    z.cooldown=z.atkCooldown;z.atkTimer=z.atkDuration;playSound('zombie_hit');
     if(Math.random()*10<z.precision){
      let dmg=Math.max(1,BASE_DMG_ZOMBIE+Math.floor(z.atk/3));
+     let ka=Math.atan2(bestTarget.y-z.fy,bestTarget.x-z.fx),kb=z.isBoss?0.6:0.35;
      if(bestTarget.isPlayer){
       dmg=Math.max(1,dmg-Math.floor(p.armor/2));
       p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;
+      let kx=p.fx+Math.cos(ka)*kb,ky=p.fy+Math.sin(ka)*kb;
+      if(canWalk(fl(kx),fl(p.fy)))p.fx=kx;
+      if(canWalk(fl(p.fx),fl(ky)))p.fy=ky;
+      p.x=fl(p.fx);p.y=fl(p.fy);
       addFloater(p.fx,p.fy,'-'+dmg,'#f44');
-      if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
+      if(p.hp<=0){state.gameOver=true;stopMusic();state.onDeath?.();emitChange()}
      }else if(bestTarget.isNPC){
-      bestTarget.npc.hp-=dmg;
-      addFloater(bestTarget.npc.fx,bestTarget.npc.fy,'-'+dmg,'#f44');
-      if(bestTarget.npc.hp<=0){bestTarget.npc.alive=false;msg(bestTarget.npc.isLeader?'Le chef est mort!':'Un survivant est mort!')}
+      let n=bestTarget.npc;
+      n.hp-=dmg;
+      let kx=n.fx+Math.cos(ka)*kb,ky=n.fy+Math.sin(ka)*kb;
+      if(canWalk(fl(kx),fl(n.fy)))n.fx=kx;
+      if(canWalk(fl(n.fx),fl(ky)))n.fy=ky;
+      n.x=fl(n.fx);n.y=fl(n.fy);
+      addFloater(n.fx,n.fy,'-'+dmg,'#f44');
+      if(n.hp<=0){n.alive=false;msg(n.isLeader?'Le chef est mort!':'Un survivant est mort!')}
      }
     }
    }
@@ -1157,7 +1349,7 @@ export function update(){
   if(distXY(r.fx,r.fy,p.fx,p.fy)<0.8){
    let dmg=Math.max(1,r.dmg-Math.floor(p.armor/3));p.hp-=dmg;p.hitSlowTimer=HIT_SLOW_DURATION;
    addFloater(p.fx,p.fy,'-'+dmg,'#f80');
-   if(p.hp<=0){state.gameOver=true;state.onDeath?.();emitChange()}
+   if(p.hp<=0){state.gameOver=true;stopMusic();state.onDeath?.();emitChange()}
    state.explosions.push({x:r.fx,y:r.fy,timer:10});state.rocks.splice(i,1);continue;
   }
   for(let n of state.npcs){
@@ -1179,23 +1371,42 @@ export function update(){
     if(nearestZ){updateNPC(n)}
     else{
      n.wanderTimer--;
-     if(n.wanderTimer<=0){n.wanderAngle=Math.random()*Math.PI*2;n.wanderTimer=rand(90,200)}
-     let wspd=0.012;
+     if(n.wanderTimer<=0){n.wanderAngle=Math.random()*Math.PI*2;n.wanderTimer=rand(60,160)}
+     let wspd=0.018;
      let wnx=n.fx+Math.cos(n.wanderAngle)*wspd,wny=n.fy+Math.sin(n.wanderAngle)*wspd;
      let dToCenter=Math.hypot(wnx-n.patrolCenterX,wny-n.patrolCenterY);
-     if(dToCenter>10){n.wanderAngle=Math.atan2(n.patrolCenterY-n.fy,n.patrolCenterX-n.fx)+((Math.random()-0.5)*1)}
+     if(dToCenter>18){n.wanderAngle=Math.atan2(n.patrolCenterY-n.fy,n.patrolCenterX-n.fx)+((Math.random()-0.5)*1)}
      if(canWalk(fl(wnx),fl(wny))){n.fx=wnx;n.fy=wny;n._moving=true}
      else{n.wanderAngle=Math.random()*Math.PI*2;n._moving=false}
      n.x=fl(n.fx);n.y=fl(n.fy);
      n.angle=n.wanderAngle;
     }
    }else{
-    updateNPC(n);
+    // Horde active: NPCs go to defense post, fight only if zombie nearby
+    let nearestZ=null,nd=Infinity;
+    for(let z of state.zombies){if(!z.alive)continue;let d=distXY(n.fx,n.fy,z.fx,z.fy);if(d<SIGHT_RADIUS*1.2&&d<nd){nearestZ=z;nd=d}}
+    if(nearestZ){updateNPC(n)}
+    else if(n.defenseX!==undefined){
+     let dPost=distXY(n.fx,n.fy,n.defenseX,n.defenseY);
+     if(dPost>0.5){
+      let spd=0.02+n.speed*0.005;
+      let adx=n.defenseX-n.fx,ady=n.defenseY-n.fy,len=Math.hypot(adx,ady)||1;
+      let nx2=n.fx+adx/len*spd,ny2=n.fy+ady/len*spd;
+      let dCanX=canWalk(fl(nx2),fl(n.fy)),dCanY=canWalk(fl(n.fx),fl(ny2));
+      if(dCanX)n.fx=nx2;
+      if(dCanY)n.fy=ny2;
+      if(!dCanX){let bd=doorAt(fl(nx2),fl(n.fy));if(bd&&bd.barricaded&&!bd.open)bd.open=true}
+      if(!dCanY){let bd=doorAt(fl(n.fx),fl(ny2));if(bd&&bd.barricaded&&!bd.open)bd.open=true}
+      n.x=fl(n.fx);n.y=fl(n.fy);n._moving=true;
+      n.angle=Math.atan2(ady,adx);
+     }else{n._moving=false;n.defenseReached=true}
+    }else{n._moving=false}
    }
   }
  }
  if(state.baseEventActive){
   let aliveZ=0;for(let z of state.zombies)if(z.alive)aliveZ++;
+  state.hordeAlive=aliveZ;
   if(aliveZ===0&&state.baseWavesLeft>0){
    state.baseWaveTimer++;
    if(state.baseWaveTimer>120){
@@ -1221,7 +1432,7 @@ export function update(){
     state.confetti.push({x:p.fx,y:p.fy,vx:(Math.random()-0.5)*0.15,vy:-Math.random()*0.12-0.03,
      color:confColors[rand(0,6)],life:120+rand(0,60)});
    }
-   for(let n of state.npcs){if(n.alive){n.speech='Victoire!!';n.speechTimer=180}}
+   for(let n of state.npcs){if(n.alive){n.speech=n.isLeader?'Tout est sous controle':'Victoire!!';n.speechTimer=300}}
    if(survivors>0){
     let rx=fl(p.fx),ry=fl(p.fy);
     let dropNear=(item)=>{for(let dr=1;dr<=3;dr++)for(let ddx=-dr;ddx<=dr;ddx++)for(let ddy=-dr;ddy<=dr;ddy++){
@@ -1237,6 +1448,8 @@ export function update(){
    do{ex=rand(0,MAP_W-1);ey=rand(0,MAP_H-1);tries++}while(state.map[ey][ex]!==0&&tries<200);
    state.escapeZone={x:ex,y:ey};state.map[ey][ex]=4;
    state.baseEventActive=false;
+   // NPCs stay where they are after horde
+   for(let n of state.npcs){if(n.alive&&n.patrolGroup!==undefined){n.patrolCenterX=n.fx;n.patrolCenterY=n.fy}}
   }
  }
  state.showStats=!!keys.Tab;
@@ -1264,7 +1477,35 @@ export function draw(){
    let bld=getBuildingOwner(x,y);
    let side=bld?getWallSide(bld,x,y):null;
    ctx.fillStyle=COLORS.wallInner;ctx.fillRect(x*s,y*s,s,s);
-   if(side==='top'){
+   if(side==='tl'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.4);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.06);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.85,y*s+s*0.4,s*0.15,s*0.6);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.4,y*s+s*0.85,s*0.6,s*0.15);
+   }else if(side==='tr'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.4);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s+s*0.6,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.06);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s+s*0.94,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s+s*0.4,s*0.15,s*0.6);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s+s*0.85,s*0.6,s*0.15);
+   }else if(side==='bl'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s+s*0.6,s,s*0.4);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s+s*0.94,s,s*0.06);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.85,y*s,s*0.15,s*0.6);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.4,y*s,s*0.6,s*0.15);
+   }else if(side==='br'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s+s*0.6,s,s*0.4);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s+s*0.6,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s+s*0.94,s,s*0.06);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s+s*0.94,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s*0.15,s*0.6);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s*0.6,s*0.15);
+   }else if(side==='top'){
     ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.4);
     ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.06);
     ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s+s*0.85,s,s*0.15);
@@ -1348,19 +1589,40 @@ export function draw(){
    ctx.beginPath();ctx.moveTo(x*s,y*s+s*0.5);ctx.lineTo(x*s+s,y*s+s*0.5);ctx.stroke();
    continue;
   }else if(t===6){
-   let wBld=getBuildingAt(x,y);
+   let wBld=getBuildingOwner(x,y);
    let wSide=wBld?getWallSide(wBld,x,y):null;
-   let isH=(wSide==='top'||wSide==='bottom');
-   ctx.fillStyle=COLORS.wall;ctx.fillRect(x*s,y*s,s,s);
-   ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.25);
-   if(isH){
-    ctx.fillStyle='rgba(100,160,220,0.25)';ctx.fillRect(x*s+s*0.15,y*s+s*0.25,s*0.7,s*0.5);
-    ctx.strokeStyle='rgba(150,200,255,0.3)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.15,y*s+s*0.25,s*0.7,s*0.5);
-    ctx.strokeStyle='rgba(150,200,255,0.15)';ctx.beginPath();ctx.moveTo(x*s+s*0.5,y*s+s*0.25);ctx.lineTo(x*s+s*0.5,y*s+s*0.75);ctx.stroke();
+   ctx.fillStyle=COLORS.wallInner;ctx.fillRect(x*s,y*s,s,s);
+   if(wSide==='top'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.4);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s,s*0.06);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s+s*0.85,s,s*0.15);
+    ctx.fillStyle='rgba(100,160,220,0.3)';ctx.fillRect(x*s+s*0.2,y*s+s*0.12,s*0.6,s*0.55);
+    ctx.strokeStyle='rgba(150,200,255,0.35)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.2,y*s+s*0.12,s*0.6,s*0.55);
+    ctx.beginPath();ctx.moveTo(x*s+s*0.5,y*s+s*0.12);ctx.lineTo(x*s+s*0.5,y*s+s*0.67);ctx.stroke();
+   }else if(wSide==='bottom'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s+s*0.6,s,s*0.4);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s+s*0.94,s,s*0.06);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s,s*0.15);
+    ctx.fillStyle='rgba(100,160,220,0.3)';ctx.fillRect(x*s+s*0.2,y*s+s*0.3,s*0.6,s*0.55);
+    ctx.strokeStyle='rgba(150,200,255,0.35)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.2,y*s+s*0.3,s*0.6,s*0.55);
+    ctx.beginPath();ctx.moveTo(x*s+s*0.5,y*s+s*0.3);ctx.lineTo(x*s+s*0.5,y*s+s*0.85);ctx.stroke();
+   }else if(wSide==='left'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s+s*0.85,y*s,s*0.15,s);
+    ctx.fillStyle='rgba(100,160,220,0.3)';ctx.fillRect(x*s+s*0.12,y*s+s*0.2,s*0.55,s*0.6);
+    ctx.strokeStyle='rgba(150,200,255,0.35)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.12,y*s+s*0.2,s*0.55,s*0.6);
+    ctx.beginPath();ctx.moveTo(x*s+s*0.12,y*s+s*0.5);ctx.lineTo(x*s+s*0.67,y*s+s*0.5);ctx.stroke();
+   }else if(wSide==='right'){
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s+s*0.6,y*s,s*0.4,s);
+    ctx.fillStyle=COLORS.wallEdge;ctx.fillRect(x*s+s*0.94,y*s,s*0.06,s);
+    ctx.fillStyle=COLORS.wallInnerTop;ctx.fillRect(x*s,y*s,s*0.15,s);
+    ctx.fillStyle='rgba(100,160,220,0.3)';ctx.fillRect(x*s+s*0.3,y*s+s*0.2,s*0.55,s*0.6);
+    ctx.strokeStyle='rgba(150,200,255,0.35)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.3,y*s+s*0.2,s*0.55,s*0.6);
+    ctx.beginPath();ctx.moveTo(x*s+s*0.3,y*s+s*0.5);ctx.lineTo(x*s+s*0.85,y*s+s*0.5);ctx.stroke();
    }else{
-    ctx.fillStyle='rgba(100,160,220,0.25)';ctx.fillRect(x*s+s*0.25,y*s+s*0.15,s*0.5,s*0.7);
-    ctx.strokeStyle='rgba(150,200,255,0.3)';ctx.lineWidth=1;ctx.strokeRect(x*s+s*0.25,y*s+s*0.15,s*0.5,s*0.7);
-    ctx.strokeStyle='rgba(150,200,255,0.15)';ctx.beginPath();ctx.moveTo(x*s+s*0.25,y*s+s*0.5);ctx.lineTo(x*s+s*0.75,y*s+s*0.5);ctx.stroke();
+    ctx.fillStyle=COLORS.wall;ctx.fillRect(x*s,y*s,s,s);
+    ctx.fillStyle=COLORS.wallTop;ctx.fillRect(x*s,y*s,s,s*0.3);
    }
    continue;
   }else{
@@ -1434,7 +1696,7 @@ export function draw(){
   }
   for(let vt of viewTiles){
    let vtBld=getBuildingOwner(vt.x,vt.y);if(!vtBld)continue;
-   let side=getWallSide(vtBld,vt.x,vt.y);if(!side)continue;
+   let side=getWallSide(vtBld,vt.x,vt.y);if(!side||side.length===2)continue;
    let inAngle;
    if(side==='top')inAngle=Math.PI/2;
    else if(side==='bottom')inAngle=-Math.PI/2;
@@ -1503,7 +1765,7 @@ export function draw(){
   let bw=s*0.7;
   ctx.fillStyle='#024';ctx.fillRect(n.fx*s+s*0.15,n.fy*s-s*0.22,bw,s*0.08);
   ctx.fillStyle='#0af';ctx.fillRect(n.fx*s+s*0.15,n.fy*s-s*0.22,bw*(n.hp/n.maxHp),s*0.08);
-  if(n.isLeader&&state.baseEvent&&!state.baseEventActive){
+  if(n.isLeader&&state.baseEvent&&!state.baseEventActive&&!state.baseRewardGiven){
    ctx.fillStyle='#ff0';ctx.font='bold '+Math.floor(s*0.4)+'px sans-serif';ctx.textAlign='center';
    let bounce=Math.sin(state.tick*0.08)*s*0.1;
    ctx.fillText('!',n.fx*s+s/2,n.fy*s-s*0.4+bounce);
@@ -1554,10 +1816,18 @@ export function draw(){
   let range=wepDef.range;
   let pcx=p.fx*s+s/2,pcy=p.fy*s+s/2;
   if(wepDef.melee){
-   ctx.strokeStyle='rgba(200,150,100,0.12)';ctx.lineWidth=1;ctx.setLineDash([s*0.08,s*0.08]);
-   ctx.beginPath();ctx.arc(pcx,pcy,range*s/2,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
-   ctx.fillStyle='rgba(200,150,100,0.05)';ctx.beginPath();ctx.moveTo(pcx,pcy);
-   ctx.arc(pcx,pcy,range*s/2,p.angle-(wepDef.arc||Math.PI/2)/2,p.angle+(wepDef.arc||Math.PI/2)/2);
+   let arc=wepDef.arc||Math.PI/2,r=range*s/2;
+   ctx.strokeStyle='rgba(200,150,100,0.2)';ctx.lineWidth=1;ctx.setLineDash([s*0.06,s*0.06]);
+   ctx.beginPath();ctx.moveTo(pcx,pcy);
+   ctx.lineTo(pcx+Math.cos(p.angle-arc/2)*r,pcy+Math.sin(p.angle-arc/2)*r);
+   ctx.stroke();
+   ctx.beginPath();ctx.moveTo(pcx,pcy);
+   ctx.lineTo(pcx+Math.cos(p.angle+arc/2)*r,pcy+Math.sin(p.angle+arc/2)*r);
+   ctx.stroke();
+   ctx.beginPath();ctx.arc(pcx,pcy,r,p.angle-arc/2,p.angle+arc/2);ctx.stroke();
+   ctx.setLineDash([]);
+   ctx.fillStyle='rgba(200,150,100,0.04)';ctx.beginPath();ctx.moveTo(pcx,pcy);
+   ctx.arc(pcx,pcy,r,p.angle-arc/2,p.angle+arc/2);
    ctx.closePath();ctx.fill();
   }else{
    let mxW=state.mouseX+cam.x,myW=state.mouseY+cam.y;
@@ -1570,7 +1840,7 @@ export function draw(){
    let retX=pcx+Math.cos(retAngle)*clampedDist;
    let retY=pcy+Math.sin(retAngle)*clampedDist;
    let spreadRad=getSpreadAtDist(wepDef,p.precision,clampedTiles);
-   if(wepDef.name==='smg')spreadRad+=p.smgHeat*SMG_HEAT_SPREAD_MULT;
+   if(wepDef.name==='smg')spreadRad=Math.min(spreadRad+p.smgHeat*SMG_HEAT_SPREAD_MULT,wepDef.baseSpread*1.5+DIST_SPREAD_FACTOR*clampedTiles);
    let circleRadius=Math.max(s*0.12,Math.tan(spreadRad)*clampedDist);
    ctx.strokeStyle='rgba(255,80,80,0.12)';ctx.lineWidth=1;
    ctx.beginPath();ctx.moveTo(pcx,pcy);ctx.lineTo(retX,retY);ctx.stroke();
@@ -1663,6 +1933,7 @@ export function startGame(){
  genMap();spawnPlayerInBuilding();
  msg('Survivez! Zone bleue = sortie. E = interagir.',3000);
  if(state.firstGame)state.showControls=true;
+ startMusic();
 }
 export function retryWithSamePlayer(){
  state.gameOver=false;
