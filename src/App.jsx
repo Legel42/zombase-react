@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE } from './engine'
+import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE, TICK_RATE, setMusicEnabled, setSfxEnabled, setTouchMode } from './engine'
 
 function HpBar({ hp, maxHp }) {
   const pct = Math.max(0, hp / maxHp * 100)
@@ -156,38 +156,82 @@ function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
 
 function TouchControls() {
   const setKey = (code, val) => { state.keys[code] = val }
-  const dirs = [
-    [null, { dir: 'ArrowUp', label: '^' }, null],
-    [{ dir: 'ArrowLeft', label: '<' }, { dir: 'ArrowDown', label: 'v' }, { dir: 'ArrowRight', label: '>' }]
-  ]
   return (
     <>
-      <div className="touch-pad">
-        {dirs.map((row, ri) => (
-          <div key={ri} style={{ display: 'flex', gap: 4 }}>
-            {row.map((d, ci) => d ? (
-              <div key={ci} className="tbtn"
-                onTouchStart={e => { e.preventDefault(); setKey(d.dir, true) }}
-                onTouchEnd={e => { e.preventDefault(); setKey(d.dir, false) }}>
-                {d.label}
-              </div>
-            ) : <div key={ci} style={{ width: 54, height: 54 }} />)}
-          </div>
-        ))}
+      <div className="touch-dpad">
+        <div className="tbtn dpad-up"
+          onTouchStart={e => { e.preventDefault(); setKey('ArrowUp', true) }}
+          onTouchEnd={e => { e.preventDefault(); setKey('ArrowUp', false) }}
+          onTouchCancel={e => { e.preventDefault(); setKey('ArrowUp', false) }}>&#9650;</div>
+        <div className="dpad-mid">
+          <div className="tbtn dpad-left"
+            onTouchStart={e => { e.preventDefault(); setKey('ArrowLeft', true) }}
+            onTouchEnd={e => { e.preventDefault(); setKey('ArrowLeft', false) }}
+            onTouchCancel={e => { e.preventDefault(); setKey('ArrowLeft', false) }}>&#9664;</div>
+          <div className="dpad-center" />
+          <div className="tbtn dpad-right"
+            onTouchStart={e => { e.preventDefault(); setKey('ArrowRight', true) }}
+            onTouchEnd={e => { e.preventDefault(); setKey('ArrowRight', false) }}
+            onTouchCancel={e => { e.preventDefault(); setKey('ArrowRight', false) }}>&#9654;</div>
+        </div>
+        <div className="tbtn dpad-down"
+          onTouchStart={e => { e.preventDefault(); setKey('ArrowDown', true) }}
+          onTouchEnd={e => { e.preventDefault(); setKey('ArrowDown', false) }}
+          onTouchCancel={e => { e.preventDefault(); setKey('ArrowDown', false) }}>&#9660;</div>
       </div>
       <div className="touch-actions">
-        <div className="tbtn" onTouchStart={e => { e.preventDefault(); state.mouseDown = true }}
-          onTouchEnd={e => { e.preventDefault(); state.mouseDown = false }}>ATK</div>
-        <div className="tbtn" onTouchStart={e => { e.preventDefault(); state.keys.KeyE = true }}>E</div>
+        <div className="tbtn tbtn-atk"
+          onTouchStart={e => { e.preventDefault(); state.mouseDown = true }}
+          onTouchEnd={e => { e.preventDefault(); state.mouseDown = false }}
+          onTouchCancel={e => { e.preventDefault(); state.mouseDown = false }}>ATK</div>
+        <div className="tbtn tbtn-interact"
+          onTouchStart={e => { e.preventDefault(); state.keys.KeyE = true }}
+          onTouchEnd={e => { e.preventDefault(); state.keys.KeyE = false }}
+          onTouchCancel={e => { e.preventDefault(); state.keys.KeyE = false }}>E</div>
+      </div>
+      <div className="touch-slots">
+        {[0,1,2,3,4].map(i => (
+          <div key={i} className={'tbtn tbtn-slot' + (state.player?.selectedSlot === i ? ' selected' : '')}
+            onTouchStart={e => { e.preventDefault(); setSelectedSlot(i) }}>{i+1}</div>
+        ))}
       </div>
     </>
+  )
+}
+
+function OptionsMenu({ onClose }) {
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.75)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:110}}>
+      <div style={{background:'#1a1a1a',border:'1px solid #444',borderRadius:12,padding:'1.5rem 2rem',minWidth:280,color:'#fff'}}>
+        <h2 style={{margin:'0 0 1rem',fontSize:'1.3rem',textAlign:'center'}}>Options</h2>
+        <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
+          <span>Musique</span>
+          <input type="checkbox" checked={state.musicEnabled} onChange={e => setMusicEnabled(e.target.checked)}
+            style={{width:20,height:20,cursor:'pointer'}} />
+        </label>
+        <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
+          <span>Effets sonores</span>
+          <input type="checkbox" checked={state.sfxEnabled} onChange={e => setSfxEnabled(e.target.checked)}
+            style={{width:20,height:20,cursor:'pointer'}} />
+        </label>
+        <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
+          <span>Mode tactile</span>
+          <input type="checkbox" checked={state.touchMode} onChange={e => setTouchMode(e.target.checked)}
+            style={{width:20,height:20,cursor:'pointer'}} />
+        </label>
+        <div style={{textAlign:'center',marginTop:'1rem'}}>
+          <button onClick={onClose} style={{background:'#333',color:'#fff',border:'1px solid #555',borderRadius:6,padding:'0.5rem 1.5rem',fontSize:'1rem',cursor:'pointer'}}>Fermer</button>
+        </div>
+      </div>
+    </div>
   )
 }
 
 export default function App() {
   const canvasRef = useRef(null)
   const [, forceUpdate] = useState(0)
-  const isTouch = 'ontouchstart' in window
+  const [showOptions, setShowOptions] = useState(false)
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0
 
   const handleRetry = useCallback(() => { retryWithSamePlayer() }, [])
   const handleNew = useCallback(() => { state.firstGame = false; startGame(); forceUpdate(n => n + 1) }, [])
@@ -202,7 +246,7 @@ export default function App() {
 
     const onKey = (e, val) => {
       state.keys[e.code] = val
-      if (e.code === 'Tab') e.preventDefault()
+      if (e.code === 'Tab' || e.code === 'Escape') e.preventDefault()
       if (val && e.code >= 'Digit1' && e.code <= 'Digit5') setSelectedSlot(parseInt(e.code[5]) - 1)
     }
     const onKD = e => onKey(e, true)
@@ -221,11 +265,19 @@ export default function App() {
     canvas.addEventListener('contextmenu', onCM)
     window.addEventListener('resize', onResize)
 
+    if (isTouch) state.touchMode = true
     startGame()
 
-    let raf
-    const loop = () => { update(); draw(); raf = requestAnimationFrame(loop) }
-    loop()
+    let raf, lastTime = performance.now(), accum = 0
+    const loop = (now) => {
+      let dt = Math.min(now - lastTime, 200)
+      lastTime = now
+      accum += dt
+      while (accum >= TICK_RATE) { update(); accum -= TICK_RATE }
+      draw()
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
 
     return () => {
       cancelAnimationFrame(raf)
@@ -271,12 +323,21 @@ export default function App() {
 
       <Inventory player={p} />
 
-      {!isTouch && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; E: interagir &bull; TAB: stats</div>}
-      {isTouch && <TouchControls />}
+      {!state.touchMode && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; E: interagir &bull; TAB: stats</div>}
+      {state.touchMode && <TouchControls />}
+
+      <div className="options-btn" onClick={() => { state.paused = true; setShowOptions(true) }}>&#9881;</div>
+      {showOptions && <OptionsMenu onClose={() => { state.paused = false; setShowOptions(false) }} />}
 
       {(state.showStats || state.showControls) && <ControlsOverlay />}
       {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapCount} kills={state.kills} />}
       {state.gameOver && <DeathScreen player={p} mapCount={state.mapCount} kills={state.kills} onRetry={handleRetry} onNew={handleNew} />}
+      {state.paused && !state.gameOver && (
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:100}}>
+          <div style={{color:'#fff',fontSize:'3rem',fontWeight:'bold',letterSpacing:'0.3em'}}>PAUSE</div>
+          <div style={{color:'#aaa',fontSize:'1rem',marginTop:'1rem'}}>Echap pour reprendre</div>
+        </div>
+      )}
     </div>
   )
 }
