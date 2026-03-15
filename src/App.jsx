@@ -174,16 +174,25 @@ function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
   return (
     <div className="death-overlay">
       <div className="death-title">Mort</div>
-      <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; {kills} eliminations</div>
-      <div className="death-stats">PV:{player.maxHp} Attaque:{player.atk} Armure:{player.armor} Precision:{player.precision} Vitesse:{player.speed}</div>
-      <div style={{color:'#aaa',fontSize:'0.85rem',margin:'0.5rem 0',lineHeight:'1.6',textAlign:'center'}}>
+      <div className="death-info">Niveau {player.level} &bull; XP: {player.xp} &bull; Pieces: {player.coins||0}</div>
+      <div style={{color:'#ccc',fontSize:'0.9rem',margin:'0.6rem 0',lineHeight:'1.8',textAlign:'center'}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0.2rem 1.5rem',maxWidth:'280px',margin:'0 auto'}}>
+          <span style={{textAlign:'right',color:'#888'}}>PV max</span><span>{player.maxHp}</span>
+          <span style={{textAlign:'right',color:'#888'}}>Attaque</span><span>{player.atk}</span>
+          <span style={{textAlign:'right',color:'#888'}}>Armure</span><span>{player.armor}</span>
+          <span style={{textAlign:'right',color:'#888'}}>Precision</span><span>{player.precision}</span>
+          <span style={{textAlign:'right',color:'#888'}}>Vitesse</span><span>{player.speed}</span>
+        </div>
+      </div>
+      <div style={{color:'#aaa',fontSize:'0.85rem',margin:'0.5rem 0',lineHeight:'1.6',textAlign:'center',borderTop:'1px solid #333',paddingTop:'0.5rem'}}>
         <div>Zombies tues: {kills}</div>
         <div>Maps parcourues: {mapCount + 1}</div>
-        <div>Batiments explores: {state.buildingsExplored}</div>
-        <div>Objets trouves: {state.itemsFound}</div>
+        <div>Batiments explores: {state.buildingsExplored||0}</div>
+        <div>Objets trouves: {state.itemsFound||0}</div>
+        <div>Hordes survivees: {state.hordeEncounters||0}</div>
       </div>
-      <button className="death-btn retry" onClick={onRetry}>Recommencer (meme perso)</button>
-      <button className="death-btn newgame" onClick={onNew}>Nouveau personnage</button>
+      <button className="death-btn retry" onClick={onRetry} style={{marginTop:'0.8rem'}}>Continuer (garder maps + inventaire)</button>
+      <button className="death-btn newgame" onClick={onNew}>Recommencer a zero</button>
     </div>
   )
 }
@@ -286,7 +295,7 @@ function TouchControls() {
         onTouchCancel={e => { e.preventDefault(); state.keys.KeyE = false }}>E</div>
       {/* Slots d'inventaire */}
       <div className="touch-slots">
-        {[0, 1, 2, 3, 4].map(i => (
+        {[0, 1, 2, 3].map(i => (
           <div key={i} className={'tbtn tbtn-slot' + (state.player?.selectedSlot === i ? ' selected' : '')}
             onTouchStart={e => { e.preventDefault(); setSelectedSlot(i) }}>{i + 1}</div>
         ))}
