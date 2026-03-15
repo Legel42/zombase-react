@@ -38,7 +38,7 @@ function StatsBar({ player, mapCount }) {
       <div className="stat-item"><span className="stat-label">ARM</span><span className="stat-val">{player.armor}</span></div>
       <div className="stat-item"><span className="stat-label">PRE</span><span className="stat-val">{player.precision}</span></div>
       <div className="stat-item"><span className="stat-label">VIT</span><span className="stat-val">{player.speed}</span></div>
-      <span className="map-badge">Map #{mapCount + 1}</span>
+      <span className="map-badge">Zone #{mapCount + 1}</span>
     </div>
   )
 }
@@ -150,7 +150,7 @@ function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
     <div className="death-overlay">
       <div className="death-title">Mort</div>
       <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; {kills} eliminations</div>
-      <div className="death-stats">PV:{player.maxHp} ATK:{player.atk} ARM:{player.armor} PRE:{player.precision} VIT:{player.speed}</div>
+      <div className="death-stats">PV:{player.maxHp} Attaque:{player.atk} Armure:{player.armor} Precision:{player.precision} Vitesse:{player.speed}</div>
       <div style={{color:'#aaa',fontSize:'0.85rem',margin:'0.5rem 0',lineHeight:'1.6',textAlign:'center'}}>
         <div>Zombies tues: {kills}</div>
         <div>Maps parcourues: {mapCount + 1}</div>
@@ -397,7 +397,7 @@ export default function App() {
           <XpBar player={p} />
           <KillBadge kills={state.kills} />
         </div>
-        <StatsBar player={p} mapCount={state.mapCount} />
+        <StatsBar player={p} mapCount={state.mapIndex} />
         <SlowIndicator player={p} />
       </div>
 
@@ -429,8 +429,8 @@ export default function App() {
       {showOptions && <OptionsMenu onClose={() => { state.paused = false; setShowOptions(false) }} />}
 
       {(state.showStats || state.showControls) && <ControlsOverlay />}
-      {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapCount} kills={state.kills} />}
-      {state.gameOver && <DeathScreen player={p} mapCount={state.mapCount} kills={state.kills} onRetry={handleRetry} onNew={handleNew} />}
+      {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapIndex} kills={state.kills} />}
+      {state.gameOver && <DeathScreen player={p} mapCount={state.maxMapIndex||state.mapIndex} kills={state.kills} onRetry={handleRetry} onNew={handleNew} />}
       {state.paused && !state.gameOver && (
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:100}}>
           <div style={{color:'#fff',fontSize:'3rem',fontWeight:'bold',letterSpacing:'0.3em'}}>PAUSE</div>
