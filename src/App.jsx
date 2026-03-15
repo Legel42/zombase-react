@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE, TICK_RATE, setMusicEnabled, setSfxEnabled, setTouchMode } from './engine'
+import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE, TICK_RATE, setMusicEnabled, setSfxEnabled, setMusicVol, setSfxVol, setTouchMode, setSkipIntro, zoom } from './engine'
 
 function HpBar({ hp, maxHp }) {
   const pct = Math.max(0, hp / maxHp * 100)
@@ -13,11 +13,12 @@ function HpBar({ hp, maxHp }) {
 }
 
 function XpBar({ player }) {
-  const pct = (player.xp / 100) * 100
+  const need = 100 + (player.level - 1) * 10
+  const pct = (player.xp / need) * 100
   return (
     <div className="xp-bar-wrap">
       <div className="xp-bar-fill" style={{ width: pct + '%' }} />
-      <div className="xp-text">XP {player.xp}/100</div>
+      <div className="xp-text">XP {player.xp}/{need}</div>
     </div>
   )
 }
@@ -107,6 +108,8 @@ function ControlsOverlay() {
         <span className="cg-key">E</span><span className="cg-desc">Interagir / Ramasser</span>
         <span className="cg-key">E (maintenir)</span><span className="cg-desc">Deplacer un baril</span>
         <span className="cg-key">E sur porte</span><span className="cg-desc">Reparer (3 mat.) / Ouvrir-fermer</span>
+        <span className="cg-key">Maintenir clic</span><span className="cg-desc">Attaque chargee (batte)</span>
+        <span className="cg-key">Molette</span><span className="cg-desc">Zoom / Dezoom</span>
         <span className="cg-key">1 - 5</span><span className="cg-desc">Changer de slot</span>
         <span className="cg-key">TAB</span><span className="cg-desc">Stats / Controles</span>
       </div>
@@ -123,19 +126,19 @@ function StatsOverlay({ player, zombies, mapCount, kills }) {
       <h2>Stats &mdash; Map #{mapCount + 1}</h2>
       <div className="stats-grid">
         <span className="sg-label">PV</span><span className="sg-val">{player.hp}/{player.maxHp}</span>
-        <span className="sg-label">Niveau</span><span className="sg-val">{player.level} ({player.xp}/100 XP)</span>
-        <span className="sg-label">Kills</span><span className="sg-val">{kills}</span>
+        <span className="sg-label">Niveau</span><span className="sg-val">{player.level} ({player.xp}/{100 + (player.level - 1) * 10} XP)</span>
+        <span className="sg-label">Eliminations</span><span className="sg-val">{kills}</span>
         <span className="sg-label">Munitions</span><span className="sg-val">{player.ammo}</span>
         <span className="sg-label">Attaque</span><span className="sg-val">{player.atk}</span>
         <span className="sg-label">Armure</span><span className="sg-val">{player.armor}</span>
         <span className="sg-label">Precision</span><span className="sg-val">{player.precision} ({spread}deg)</span>
         <span className="sg-label">Vitesse</span><span className="sg-val">{player.speed}</span>
         <span className="sg-label">Zombies</span><span className="sg-val">{alive}/{zombies.length}</span>
-        <span className="sg-label">Batte</span><span className="sg-val">{WEAPON_DEFS.bat.dmg} dmg</span>
-        <span className="sg-label">Pistolet</span><span className="sg-val">{WEAPON_DEFS.gun.dmg} dmg</span>
-        <span className="sg-label">Fusil a pompe</span><span className="sg-val">{WEAPON_DEFS.shotgun.dmg}x{WEAPON_DEFS.shotgun.pellets} dmg</span>
-        <span className="sg-label">Mitraillette</span><span className="sg-val">{WEAPON_DEFS.smg.dmg} dmg (auto)</span>
-        <span className="sg-label">Zombie</span><span className="sg-val">{BASE_DMG_ZOMBIE} dmg</span>
+        <span className="sg-label">Batte</span><span className="sg-val">{WEAPON_DEFS.bat.dmg} degats</span>
+        <span className="sg-label">Pistolet</span><span className="sg-val">{WEAPON_DEFS.gun.dmg} degats</span>
+        <span className="sg-label">Fusil a pompe</span><span className="sg-val">{WEAPON_DEFS.shotgun.dmg}x{WEAPON_DEFS.shotgun.pellets} degats</span>
+        <span className="sg-label">Mitraillette</span><span className="sg-val">{WEAPON_DEFS.smg.dmg} degats (auto)</span>
+        <span className="sg-label">Zombie</span><span className="sg-val">{BASE_DMG_ZOMBIE} degats</span>
       </div>
       <div className="stats-footer">E = interagir &bull; Zone bleue = fuir &bull; Porte reparee: E pour ouvrir/fermer</div>
     </div>
@@ -146,8 +149,14 @@ function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
   return (
     <div className="death-overlay">
       <div className="death-title">Mort</div>
-      <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; {kills} kills</div>
+      <div className="death-info">Niveau {player.level} &bull; Map #{mapCount + 1} &bull; {kills} eliminations</div>
       <div className="death-stats">PV:{player.maxHp} ATK:{player.atk} ARM:{player.armor} PRE:{player.precision} VIT:{player.speed}</div>
+      <div style={{color:'#aaa',fontSize:'0.85rem',margin:'0.5rem 0',lineHeight:'1.6',textAlign:'center'}}>
+        <div>Zombies tues: {kills}</div>
+        <div>Maps parcourues: {mapCount + 1}</div>
+        <div>Batiments explores: {state.buildingsExplored}</div>
+        <div>Objets trouves: {state.itemsFound}</div>
+      </div>
       <button className="death-btn retry" onClick={onRetry}>Recommencer (meme perso)</button>
       <button className="death-btn newgame" onClick={onNew}>Nouveau personnage</button>
     </div>
@@ -155,44 +164,106 @@ function DeathScreen({ player, mapCount, kills, onRetry, onNew }) {
 }
 
 function TouchControls() {
-  const setKey = (code, val) => { state.keys[code] = val }
+  const joystickRef = useRef(null)
+  const joystickData = useRef({ active: false, id: null, cx: 0, cy: 0 })
+  const aimData = useRef({ active: false, id: null })
+  const JOYSTICK_R = 60
+  const DEAD_ZONE = 10
+  const [stick, setStick] = useState({ x: 0, y: 0 })
+
+  const onJoystickStart = useCallback(e => {
+    e.preventDefault()
+    const t = e.changedTouches[0]
+    const rect = joystickRef.current.getBoundingClientRect()
+    joystickData.current = { active: true, id: t.identifier, cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 }
+  }, [])
+
+  const onJoystickMove = useCallback(e => {
+    e.preventDefault()
+    const jd = joystickData.current
+    if (!jd.active) return
+    for (let t of e.changedTouches) {
+      if (t.identifier !== jd.id) continue
+      let dx = t.clientX - jd.cx, dy = t.clientY - jd.cy
+      let dist = Math.hypot(dx, dy)
+      if (dist > JOYSTICK_R) { dx = dx / dist * JOYSTICK_R; dy = dy / dist * JOYSTICK_R; dist = JOYSTICK_R }
+      setStick({ x: dx, y: dy })
+      if (dist < DEAD_ZONE) {
+        state.keys.ArrowUp = false; state.keys.ArrowDown = false
+        state.keys.ArrowLeft = false; state.keys.ArrowRight = false
+      } else {
+        const angle = Math.atan2(dy, dx)
+        state.keys.ArrowUp = angle < -Math.PI / 6 && angle > -5 * Math.PI / 6
+        state.keys.ArrowDown = angle > Math.PI / 6 && angle < 5 * Math.PI / 6
+        state.keys.ArrowLeft = Math.abs(angle) > 2 * Math.PI / 6
+        state.keys.ArrowRight = Math.abs(angle) < 4 * Math.PI / 6
+      }
+    }
+  }, [])
+
+  const onJoystickEnd = useCallback(e => {
+    e.preventDefault()
+    for (let t of e.changedTouches) {
+      if (t.identifier !== joystickData.current.id) continue
+      joystickData.current.active = false
+      setStick({ x: 0, y: 0 })
+      state.keys.ArrowUp = false; state.keys.ArrowDown = false
+      state.keys.ArrowLeft = false; state.keys.ArrowRight = false
+    }
+  }, [])
+
+  const onAimStart = useCallback(e => {
+    e.preventDefault()
+    const t = e.changedTouches[0]
+    aimData.current = { active: true, id: t.identifier }
+    const cx = window.innerWidth / 2, cy = window.innerHeight / 2
+    state.touchAimAngle = Math.atan2(t.clientY - cy, t.clientX - cx)
+    state.mouseDown = true
+  }, [])
+
+  const onAimMove = useCallback(e => {
+    e.preventDefault()
+    for (let t of e.changedTouches) {
+      if (t.identifier !== aimData.current.id) continue
+      const cx = window.innerWidth / 2, cy = window.innerHeight / 2
+      state.touchAimAngle = Math.atan2(t.clientY - cy, t.clientX - cx)
+    }
+  }, [])
+
+  const onAimEnd = useCallback(e => {
+    e.preventDefault()
+    for (let t of e.changedTouches) {
+      if (t.identifier !== aimData.current.id) continue
+      aimData.current.active = false
+      state.mouseDown = false
+      state.touchAimAngle = null
+    }
+  }, [])
+
   return (
     <>
-      <div className="touch-dpad">
-        <div className="tbtn dpad-up"
-          onTouchStart={e => { e.preventDefault(); setKey('ArrowUp', true) }}
-          onTouchEnd={e => { e.preventDefault(); setKey('ArrowUp', false) }}
-          onTouchCancel={e => { e.preventDefault(); setKey('ArrowUp', false) }}>&#9650;</div>
-        <div className="dpad-mid">
-          <div className="tbtn dpad-left"
-            onTouchStart={e => { e.preventDefault(); setKey('ArrowLeft', true) }}
-            onTouchEnd={e => { e.preventDefault(); setKey('ArrowLeft', false) }}
-            onTouchCancel={e => { e.preventDefault(); setKey('ArrowLeft', false) }}>&#9664;</div>
-          <div className="dpad-center" />
-          <div className="tbtn dpad-right"
-            onTouchStart={e => { e.preventDefault(); setKey('ArrowRight', true) }}
-            onTouchEnd={e => { e.preventDefault(); setKey('ArrowRight', false) }}
-            onTouchCancel={e => { e.preventDefault(); setKey('ArrowRight', false) }}>&#9654;</div>
+      {/* Joystick gauche */}
+      <div ref={joystickRef} className="touch-joystick"
+        onTouchStart={onJoystickStart} onTouchMove={onJoystickMove}
+        onTouchEnd={onJoystickEnd} onTouchCancel={onJoystickEnd}>
+        <div className="joystick-bg">
+          <div className="joystick-thumb" style={{ transform: `translate(${stick.x}px, ${stick.y}px)` }} />
         </div>
-        <div className="tbtn dpad-down"
-          onTouchStart={e => { e.preventDefault(); setKey('ArrowDown', true) }}
-          onTouchEnd={e => { e.preventDefault(); setKey('ArrowDown', false) }}
-          onTouchCancel={e => { e.preventDefault(); setKey('ArrowDown', false) }}>&#9660;</div>
       </div>
-      <div className="touch-actions">
-        <div className="tbtn tbtn-atk"
-          onTouchStart={e => { e.preventDefault(); state.mouseDown = true }}
-          onTouchEnd={e => { e.preventDefault(); state.mouseDown = false }}
-          onTouchCancel={e => { e.preventDefault(); state.mouseDown = false }}>ATK</div>
-        <div className="tbtn tbtn-interact"
-          onTouchStart={e => { e.preventDefault(); state.keys.KeyE = true }}
-          onTouchEnd={e => { e.preventDefault(); state.keys.KeyE = false }}
-          onTouchCancel={e => { e.preventDefault(); state.keys.KeyE = false }}>E</div>
-      </div>
+      {/* Zone de tir droite */}
+      <div className="touch-aim-zone"
+        onTouchStart={onAimStart} onTouchMove={onAimMove}
+        onTouchEnd={onAimEnd} onTouchCancel={onAimEnd} />
+      {/* Bouton interagir */}
+      <div className="touch-interact-btn"
+        onTouchStart={e => { e.preventDefault(); state.keys.KeyE = true }}
+        onTouchEnd={e => { e.preventDefault(); state.keys.KeyE = false }}
+        onTouchCancel={e => { e.preventDefault(); state.keys.KeyE = false }}>E</div>
+      {/* Slots d'inventaire */}
       <div className="touch-slots">
-        {[0,1,2,3,4].map(i => (
+        {[0, 1, 2, 3, 4].map(i => (
           <div key={i} className={'tbtn tbtn-slot' + (state.player?.selectedSlot === i ? ' selected' : '')}
-            onTouchStart={e => { e.preventDefault(); setSelectedSlot(i) }}>{i+1}</div>
+            onTouchStart={e => { e.preventDefault(); setSelectedSlot(i) }}>{i + 1}</div>
         ))}
       </div>
     </>
@@ -209,17 +280,35 @@ function OptionsMenu({ onClose }) {
           <input type="checkbox" checked={state.musicEnabled} onChange={e => setMusicEnabled(e.target.checked)}
             style={{width:20,height:20,cursor:'pointer'}} />
         </label>
+        {state.musicEnabled && <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.25rem 0 0.5rem'}}>
+          <span style={{fontSize:'0.85rem',color:'#999'}}>Volume musique</span>
+          <input type="range" min="0" max="1" step="0.05" value={state.musicVol}
+            onChange={e => setMusicVol(parseFloat(e.target.value))}
+            style={{width:120,cursor:'pointer'}} />
+        </label>}
         <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
           <span>Effets sonores</span>
           <input type="checkbox" checked={state.sfxEnabled} onChange={e => setSfxEnabled(e.target.checked)}
             style={{width:20,height:20,cursor:'pointer'}} />
         </label>
+        {state.sfxEnabled && <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.25rem 0 0.5rem'}}>
+          <span style={{fontSize:'0.85rem',color:'#999'}}>Volume effets</span>
+          <input type="range" min="0" max="1" step="0.05" value={state.sfxVol}
+            onChange={e => setSfxVol(parseFloat(e.target.value))}
+            style={{width:120,cursor:'pointer'}} />
+        </label>}
         <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
           <span>Mode tactile</span>
           <input type="checkbox" checked={state.touchMode} onChange={e => setTouchMode(e.target.checked)}
             style={{width:20,height:20,cursor:'pointer'}} />
         </label>
-        <div style={{textAlign:'center',marginTop:'1rem'}}>
+        <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.5rem 0',cursor:'pointer'}}>
+          <span>Passer l'intro</span>
+          <input type="checkbox" checked={state.skipIntro} onChange={e => setSkipIntro(e.target.checked)}
+            style={{width:20,height:20,cursor:'pointer'}} />
+        </label>
+        <div style={{textAlign:'center',marginTop:'1rem',display:'flex',gap:'0.5rem',justifyContent:'center'}}>
+          <button onClick={() => { if(!document.fullscreenElement)document.documentElement.requestFullscreen().catch(()=>{}); else document.exitFullscreen() }} style={{background:'#444',color:'#fff',border:'1px solid #555',borderRadius:6,padding:'0.5rem 1rem',fontSize:'1rem',cursor:'pointer'}}>Plein ecran</button>
           <button onClick={onClose} style={{background:'#333',color:'#fff',border:'1px solid #555',borderRadius:6,padding:'0.5rem 1.5rem',fontSize:'1rem',cursor:'pointer'}}>Fermer</button>
         </div>
       </div>
@@ -255,6 +344,7 @@ export default function App() {
     const onMD = e => { if (e.button === 0) state.mouseDown = true }
     const onMU = e => { if (e.button === 0) state.mouseDown = false }
     const onCM = e => e.preventDefault()
+    const onWheel = e => { e.preventDefault(); zoom(e.deltaY) }
     const onResize = () => resize()
 
     window.addEventListener('keydown', onKD)
@@ -263,6 +353,7 @@ export default function App() {
     canvas.addEventListener('mousedown', onMD)
     canvas.addEventListener('mouseup', onMU)
     canvas.addEventListener('contextmenu', onCM)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
     window.addEventListener('resize', onResize)
 
     if (isTouch) state.touchMode = true
@@ -287,6 +378,7 @@ export default function App() {
       canvas.removeEventListener('mousedown', onMD)
       canvas.removeEventListener('mouseup', onMU)
       canvas.removeEventListener('contextmenu', onCM)
+      canvas.removeEventListener('wheel', onWheel)
       window.removeEventListener('resize', onResize)
     }
   }, [])
@@ -316,17 +408,24 @@ export default function App() {
       )}
       {state.baseEventActive && (
         <div className="base-status">
-          DEFENSE DE BASE &bull; Zombies: {state.hordeAlive} &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.length}
-          {state.baseBoss && state.baseBoss.alive && ' &bull; BOSS'}
+          DEFENSE DE BASE &bull; Vague {state.currentWave}/{3} &bull; Restants: {state.hordeAlive} &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.filter(n => !n.isMadman).length}
+          {state.baseBoss && state.baseBoss.alive && ' \u2022 BOSS'}
+        </div>
+      )}
+
+      {state.paused && !showOptions && (
+        <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',zIndex:20,background:'rgba(0,0,0,0.6)',backdropFilter:'blur(4px)'}}>
+          <div style={{color:'#fff',fontSize:'2.5rem',fontWeight:900,letterSpacing:'8px',textTransform:'uppercase',textShadow:'0 0 20px rgba(255,255,255,0.2)'}}>PAUSE</div>
         </div>
       )}
 
       <Inventory player={p} />
 
-      {!state.touchMode && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; E: interagir &bull; TAB: stats</div>}
+      {!state.touchMode && <div className="controls-hint">ZQSD: bouger &bull; Clic: attaquer &bull; Maintenir: charge &bull; E: interagir &bull; TAB: stats &bull; Molette: zoom</div>}
       {state.touchMode && <TouchControls />}
 
       <div className="options-btn" onClick={() => { state.paused = true; setShowOptions(true) }}>&#9881;</div>
+      <div className="fullscreen-btn" onClick={() => { if(!document.fullscreenElement)document.documentElement.requestFullscreen().catch(()=>{}); else document.exitFullscreen() }}>&#x26F6;</div>
       {showOptions && <OptionsMenu onClose={() => { state.paused = false; setShowOptions(false) }} />}
 
       {(state.showStats || state.showControls) && <ControlsOverlay />}
