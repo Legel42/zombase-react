@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE, TICK_RATE, setMusicEnabled, setSfxEnabled, setMusicVol, setSfxVol, setTouchMode, setSkipIntro, zoom } from './engine'
+import { state, initCanvas, resize, startGame, retryWithSamePlayer, update, draw, setSelectedSlot, WEAPON_DEFS, BASE_DMG_ZOMBIE, TICK_RATE, setMusicEnabled, setSfxEnabled, setMusicVol, setSfxVol, setTouchMode, setSkipIntro, zoom, SHOP_ITEMS, buyItem } from './engine'
 
 function HpBar({ hp, maxHp }) {
   const pct = Math.max(0, hp / maxHp * 100)
@@ -60,18 +60,16 @@ function ShotgunIcon() {
 function SmgIcon() {
   return <svg viewBox="0 0 28 28"><rect x="4" y="12" width="14" height="3" rx="1" fill="#222"/><rect x="2" y="10.5" width="5" height="5" rx="1" fill="#1a1a1a"/><rect x="10" y="15" width="3" height="4" rx="1" fill="#333"/></svg>
 }
-function MatIcon() {
-  return <svg viewBox="0 0 28 28"><rect x="6" y="6" width="16" height="16" rx="2" fill="#cc0" opacity="0.8"/></svg>
-}
 
 const WEAPON_LABELS = { bat: 'Batte', gun: 'Pistolet', shotgun: 'Fusil', smg: 'SMG' }
 
 function Inventory({ player }) {
   const sel = player.inventory[player.selectedSlot]
   const isRanged = sel && sel.type === 'weapon' && sel.name !== 'bat'
-  const selLabel = sel ? (sel.type === 'weapon' ? WEAPON_LABELS[sel.name] : sel.type === 'material' ? 'Materiaux' : '') : ''
+  const selLabel = sel ? (sel.type === 'weapon' ? WEAPON_LABELS[sel.name] : '') : ''
   return (
     <div className="inventory-wrap">
+      <div className="inv-coins">💰 {player.coins || 0}$</div>
       {selLabel && <div className="inv-weapon-name">{selLabel}</div>}
       {isRanged && (
         <div className="inv-ammo-display">{player.ammo} balles</div>
@@ -86,12 +84,17 @@ function Inventory({ player }) {
                 {item.name === 'gun' && <GunIcon />}
                 {item.name === 'shotgun' && <ShotgunIcon />}
                 {item.name === 'smg' && <SmgIcon />}
-                {item.type === 'material' && <MatIcon />}
               </div>
             )}
-            {item?.type === 'material' && <span className="inv-qty">{item.qty}</span>}
           </div>
         ))}
+        <div className="inv-slot heal-slot">
+          <span className="slot-num">F</span>
+          {player.healSlot && (
+            <div className="inv-icon heal-icon">+</div>
+          )}
+          {player.healSlot && <span className="inv-qty">{player.healSlot.qty}</span>}
+        </div>
       </div>
     </div>
   )
@@ -107,13 +110,35 @@ function ControlsOverlay() {
         <span className="cg-key">Clic gauche</span><span className="cg-desc">Attaquer</span>
         <span className="cg-key">E</span><span className="cg-desc">Interagir / Ramasser</span>
         <span className="cg-key">E (maintenir)</span><span className="cg-desc">Deplacer un baril</span>
-        <span className="cg-key">E sur porte</span><span className="cg-desc">Reparer (3 mat.) / Ouvrir-fermer</span>
+        <span className="cg-key">E sur porte</span><span className="cg-desc">Reparer (300$) / Ouvrir-fermer</span>
+        <span className="cg-key">F</span><span className="cg-desc">Utiliser bandage</span>
         <span className="cg-key">Maintenir clic</span><span className="cg-desc">Attaque chargee (batte)</span>
         <span className="cg-key">Molette</span><span className="cg-desc">Zoom / Dezoom</span>
-        <span className="cg-key">1 - 5</span><span className="cg-desc">Changer de slot</span>
+        <span className="cg-key">1 - 4</span><span className="cg-desc">Changer de slot</span>
+        <span className="cg-key">B</span><span className="cg-desc">Boutique</span>
         <span className="cg-key">TAB</span><span className="cg-desc">Stats / Controles</span>
       </div>
       <div className="controls-footer">Munitions universelles &bull; Armes rares sur zombies (5%) &bull; Difficulte progressive</div>
+    </div>
+  )
+}
+
+function ShopPanel({ player }) {
+  return (
+    <div className="shop-panel glass">
+      <h2>Boutique</h2>
+      <div className="shop-coins">{player.coins || 0}$</div>
+      <div className="shop-grid">
+        {SHOP_ITEMS.map(item => (
+          <button key={item.id} className="shop-item" disabled={player.coins < item.cost}
+            onClick={() => buyItem(item.id)}>
+            <span className="shop-name">{item.label}</span>
+            <span className="shop-desc">{item.desc}</span>
+            <span className="shop-cost">{item.cost}$</span>
+          </button>
+        ))}
+      </div>
+      <div className="shop-hint">B ou ESC pour fermer</div>
     </div>
   )
 }
@@ -408,7 +433,7 @@ export default function App() {
       )}
       {state.baseEventActive && (
         <div className="base-status">
-          DEFENSE DE BASE &bull; Vague {state.currentWave}/{3} &bull; Restants: {state.hordeAlive} &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.filter(n => !n.isMadman).length}
+          DEFENSE DE BASE &bull; Vague {state.currentWave}/{2} &bull; Restants: {state.hordeAlive} &bull; Survivants: {state.npcs.filter(n => n.alive).length}/{state.npcs.filter(n => !n.isMadman).length}
           {state.baseBoss && state.baseBoss.alive && ' \u2022 BOSS'}
         </div>
       )}
@@ -430,6 +455,7 @@ export default function App() {
 
       {(state.showStats || state.showControls) && <ControlsOverlay />}
       {state.showStats && <StatsOverlay player={p} zombies={state.zombies} mapCount={state.mapIndex} kills={state.kills} />}
+      {state.shopOpen && <ShopPanel player={p} />}
       {state.gameOver && <DeathScreen player={p} mapCount={state.maxMapIndex||state.mapIndex} kills={state.kills} onRetry={handleRetry} onNew={handleNew} />}
       {state.paused && !state.gameOver && (
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:100}}>
